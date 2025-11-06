@@ -58,135 +58,157 @@ def generate_initial_platforms():
     """Generates the starting platforms and resets the list."""
     global platforms
     platforms.clear()
-    # Start platform
     platforms.append(pygame.Rect(WIDTH // 2 - 50, HEIGHT - 100, 100, 12))
-    # Generate some platforms above the start
     y = HEIGHT - 250
-    while y > -HEIGHT: # Generate up to one screen height above the start
+    while y > -HEIGHT:
         x = random.randint(0, WIDTH - PLATFORM_WIDTH)
         platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
         y -= random.randint(80, 120)
 
-generate_initial_platforms() # Create the first set of platforms
+generate_initial_platforms()
 
+# Game State
 score = 0
 is_jumping = False
-scroll = 0 # New variable to track scrolling
+scroll = 0
+game_state = "START" # Can be "START", "PLAYING", "GAME_OVER"
 
 # 启动音频线程/流
 audio_stream = start_audio_stream()
 
 running = True
 while running:
-    clock.tick(60)
+    # --- Event Handling (common to all states) ---
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+        # Handle input to start/restart the game
+        if (game_state == "START" or game_state == "GAME_OVER") and event.type == pygame.KEYDOWN:
+            # Reset all game variables for a fresh start
+            player_x = WIDTH//2 - player_w//2
+            player_y = HEIGHT - 200
+            player_vx = velocity_y = 0
+            score = 0
+            scroll = 0
+            is_jumping = False
+            generate_initial_platforms()
+            game_state = "PLAYING"
 
-    # 横向输入
-    keys = pygame.key.get_pressed()
-    if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-        player_vx = -speed
-    elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-        player_vx = speed
-    else:
-        player_vx = 0
+    # --- State Machine ---
+    if game_state == "START":
+        screen.fill((20, 24, 30))
+        title_font = pygame.font.SysFont(None, 72)
+        info_font = pygame.font.SysFont(None, 36)
+        
+        title_text = title_font.render("Sound Jumper", True, (200, 200, 200))
+        info_text = info_font.render("Press any key to start", True, (150, 150, 150))
+        
+        screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//3))
+        screen.blit(info_text, (WIDTH//2 - info_text.get_width()//2, HEIGHT//2))
 
-    # 获取当前音量
-    with lock:
-        current_rms = volume_rms
+    elif game_state == "PLAYING":
+        # 横向输入
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            player_vx = -speed
+        elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            player_vx = speed
+        else:
+            player_vx = 0
 
-    jump_force = 0.0
-    if current_rms > VOLUME_THRESHOLD:
-        jump_force = (current_rms - VOLUME_THRESHOLD) * VOLUME_SENSITIVITY
-        if jump_force > 18:
-            jump_force = 18
+        # 获取当前音量
+        with lock:
+            current_rms = volume_rms
 
-    player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
-    
-    # Check for landing on a platform
-    standing_on = None
-    if velocity_y >= 0: # Only check for landing if falling down
-        for plat in platforms:
-            # Check collision and that the player is above the platform
-            if player_rect.colliderect(plat) and player_rect.bottom < plat.bottom:
-                standing_on = plat
-                break
+        jump_force = 0.0
+        if current_rms > VOLUME_THRESHOLD:
+            jump_force = (current_rms - VOLUME_THRESHOLD) * VOLUME_SENSITIVITY
+            if jump_force > 18:
+                jump_force = 18
 
-    # If standing on a platform, correct position and reset jump state
-    if standing_on:
-        player_y = standing_on.top - player_h
-        velocity_y = 0
-        is_jumping = False
-
-    # Sound-triggered jump
-    if standing_on and jump_force > 1.0 and not is_jumping:
-        velocity_y = - (6 + jump_force)
-        is_jumping = True
-    else:
-        # Apply gravity if in the air
-        if not standing_on:
+        # --- Physics Update ---
+        player_x += player_vx
+        player_y += velocity_y
+        
+        player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
+        
+        # --- Collision Detection (Corrected) ---
+        standing_on = None
+        if velocity_y >= 0:  # Only check for landing when falling
+            for plat in platforms:
+                # Check if the player is colliding AND their bottom is near the platform's top
+                if player_rect.colliderect(plat) and abs(player_rect.bottom - plat.top) < velocity_y + 1:
+                    standing_on = plat
+                    break
+        
+        if standing_on:
+            player_y = standing_on.top - player_h # Snap to top of platform
+            velocity_y = 0
+            is_jumping = False
+        else:
+            # Apply gravity if not on a platform
             velocity_y += gravity
 
-    # 更新位置
-    player_x += player_vx
-    player_y += velocity_y
+        # Jump Logic
+        if standing_on and jump_force > 1.0 and not is_jumping:
+            velocity_y = - (6 + jump_force)
+            is_jumping = True
 
-    # --- Screen Scrolling & Map Generation ---
-    if player_y < HEIGHT / 2.5: # If player is in the top 40% of the screen
-        scroll_amount = (HEIGHT / 2.5) - player_y
-        player_y += scroll_amount  # Move player down to the threshold
-        scroll += scroll_amount    # Increase total scroll
+        # --- Screen Scrolling ---
+        if player_y < HEIGHT / 2.5:
+            scroll_amount = (HEIGHT / 2.5) - player_y
+            player_y += scroll_amount
+            scroll += scroll_amount
+            for plat in platforms:
+                plat.y += scroll_amount
+            
+            platforms = [p for p in platforms if p.bottom > 0 and p.top < HEIGHT]
+
+            highest_platform_y = min(p.y for p in platforms) if platforms else HEIGHT
+            if len(platforms) < 15:
+                y = highest_platform_y
+                while y > -HEIGHT:
+                    y -= random.randint(80, 120)
+                    x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+                    platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
         
-        # Move all platforms down
+        score = int(scroll / 10)
+
+        # --- Boundaries ---
+        if player_x < -player_w: player_x = WIDTH
+        elif player_x > WIDTH: player_x = -player_w
+        
+        if player_y > HEIGHT:
+            game_state = "GAME_OVER"
+
+        # --- Rendering ---
+        screen.fill((20, 24, 30))
         for plat in platforms:
-            plat.y += scroll_amount
+            pygame.draw.rect(screen, (180, 180, 100), plat)
+        pygame.draw.rect(screen, (200, 80, 120), (int(player_x), int(player_y), player_w, player_h))
+        vol_pct = min(1.0, current_rms / 0.02)
+        pygame.draw.rect(screen, (40,40,40), (10, 10, 200, 16))
+        pygame.draw.rect(screen, (80, 200, 120), (10, 10, int(200 * vol_pct), 16))
+        score_text = FONT.render(f"Score: {score}", True, (200,200,200))
+        screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
+        screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump.", True, (200,200,200)), (10, 40))
 
-        # Remove platforms that have scrolled off the bottom
-        platforms = [p for p in platforms if p.top < HEIGHT]
+    elif game_state == "GAME_OVER":
+        screen.fill((20, 24, 30))
+        title_font = pygame.font.SysFont(None, 72)
+        score_font = pygame.font.SysFont(None, 48)
+        info_font = pygame.font.SysFont(None, 36)
+        
+        title_text = title_font.render("Game Over", True, (200, 80, 120))
+        score_text = score_font.render(f"Final Score: {score}", True, (200, 200, 200))
+        info_text = info_font.render("Press any key to play again", True, (150, 150, 150))
 
-        # Generate new platforms at the top
-        highest_platform_y = min(p.y for p in platforms) if platforms else HEIGHT
-        if len(platforms) < 15: # Maintain a certain number of platforms
-            y = highest_platform_y
-            while y > -HEIGHT: # Generate new platforms up to one screen height above
-                y -= random.randint(80, 120)
-                x = random.randint(0, WIDTH - PLATFORM_WIDTH)
-                platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
-    
-    score = int(scroll / 10) # Update score based on scroll amount
+        screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//4))
+        screen.blit(score_text, (WIDTH//2 - score_text.get_width()//2, HEIGHT//2 - 50))
+        screen.blit(info_text, (WIDTH//2 - info_text.get_width()//2, HEIGHT//2 + 20))
 
-    # 横向边界处理
-    if player_x < -player_w:
-        player_x = WIDTH
-    elif player_x > WIDTH:
-        player_x = -player_w
-
-    # Game Over:掉出底部
-    if player_y > HEIGHT:
-        # Reset game state
-        player_x = WIDTH//2 - player_w//2
-        player_y = HEIGHT - 200
-        player_vx = velocity_y = 0
-        score = 0
-        scroll = 0
-        generate_initial_platforms() # Regenerate the map from the start
-
-    # 渲染
-    screen.fill((20, 24, 30))
-    for plat in platforms:
-        pygame.draw.rect(screen, (180, 180, 100), plat)
-    pygame.draw.rect(screen, (200, 80, 120), (int(player_x), int(player_y), player_w, player_h))
-
-    # UI
-    vol_pct = min(1.0, current_rms / 0.02)
-    pygame.draw.rect(screen, (40,40,40), (10, 10, 200, 16))
-    pygame.draw.rect(screen, (80, 200, 120), (10, 10, int(200 * vol_pct), 16))
-    score_text = FONT.render(f"Score: {score}", True, (200,200,200))
-    screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
-    # --- EDITED LINE ---
-    screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump.", True, (200,200,200)), (10, 40))
     pygame.display.flip()
+    clock.tick(60)
 
 # 退出前停止音频流
 audio_stream.stop()
