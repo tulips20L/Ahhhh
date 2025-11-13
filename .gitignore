@@ -1,0 +1,7 @@
+**/__pycache__/
+
+# any .venv folder
+**/.venv/
+
+**/.env
+**/.python-version
