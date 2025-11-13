@@ -10,6 +10,8 @@ from scipy.interpolate import interp1d
 SAMPLE_RATE = 44100
 FRAME_SIZE = 1024 # Must be a power of 2 for FFT
 volume_rms = 0.0
+# Input gain (multiplier applied to incoming audio)
+input_gain = 1.0
 # New: For FFT frequency data
 fft_data = np.zeros(FRAME_SIZE // 2)
 lock = threading.Lock()
@@ -18,7 +20,12 @@ def audio_callback(indata, frames, time_info, status):
     global volume_rms, fft_data
     if status:
         pass
+    # Convert to mono
     mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata
+    # Read current input gain (thread-safe)
+    with lock:
+        g = input_gain
+    mono = mono * g
     rms = np.sqrt(np.mean(mono.astype(np.float64)**2))
     
     # Perform FFT
@@ -38,6 +45,9 @@ def start_audio_stream():
                             blocksize=FRAME_SIZE, callback=audio_callback)
     stream.start()
     return stream
+
+
+# In-game settings UI will be rendered with pygame (no external GUI)
 
 # ---------- Pygame 游戏设置 ----------
 pygame.init()
@@ -122,13 +132,66 @@ equalizer_bars = [EqualizerBar(i * BAR_WIDTH) for i in range(NUM_BARS)]
 # --- Game State ---
 score, is_jumping, scroll, game_state = 0, False, 0, "START"
 
-# 启动音频线程/流
+# Pygame in-game settings UI state
+settings_open = False
+# UI layout: settings icon top-left, volume bar below, instructions under that
+settings_icon_rect = pygame.Rect(10, 10, 32, 32)
+volume_bar_rect = pygame.Rect(10, 50, 200, 12)  # RMS volume bar
+gain_label_pos = (volume_bar_rect.right + 10, volume_bar_rect.top - 4)
+instructions_pos = (10, 74)
+# Settings panel opens on the right near the top (avoids overlapping HUD)
+settings_rect = pygame.Rect(WIDTH - 320, 10, 300, 80)
+slider_rect = pygame.Rect(settings_rect.left + 16, settings_rect.top + 36, settings_rect.width - 32, 10)
+slider_handle_radius = 8
+dragging_slider = False
+
+# Start audio stream
 audio_stream = start_audio_stream()
 running = True
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            mx, my = event.pos
+            # Click anywhere to start the game from START or GAME_OVER
+            if game_state in ("START", "GAME_OVER"):
+                player_x, player_y = WIDTH//2 - player_w//2, HEIGHT - 200
+                player_vx, velocity_y, score, scroll, is_jumping = 0, 0, 0, 0, False
+                generate_initial_platforms()
+                game_state = "PLAYING"
+
+            if settings_icon_rect.collidepoint(mx, my):
+                settings_open = not settings_open
+            # Start dragging the slider when clicking on the settings slider (if open)
+            if settings_open and slider_rect.collidepoint(mx, my):
+                dragging_slider = True
+            # Also allow clicking/drags directly on the RMS volume bar to change gain anytime
+            if volume_bar_rect.collidepoint(mx, my):
+                # Map x to gain immediately
+                rel = (mx - volume_bar_rect.left) / volume_bar_rect.width
+                rel = max(0.0, min(1.0, rel))
+                with lock:
+                    input_gain = rel * 5.0
+                dragging_slider = True
+
+        if event.type == pygame.MOUSEBUTTONUP:
+            dragging_slider = False
+
+        if event.type == pygame.MOUSEMOTION and dragging_slider:
+            mx, my = event.pos
+            # Prefer the settings slider if open, otherwise the volume bar
+            if settings_open:
+                left = slider_rect.left
+                width = slider_rect.width
+            else:
+                left = volume_bar_rect.left
+                width = volume_bar_rect.width
+            rel = (mx - left) / width
+            rel = max(0.0, min(1.0, rel))
+            with lock:
+                input_gain = rel * 5.0
+
         if (game_state == "START" or game_state == "GAME_OVER") and event.type == pygame.KEYDOWN:
             player_x, player_y = WIDTH//2 - player_w//2, HEIGHT - 200
             player_vx, velocity_y, score, scroll, is_jumping = 0, 0, 0, 0, False
@@ -204,6 +267,16 @@ while running:
     for bar in equalizer_bars:
         bar.draw(screen)
 
+    # Draw settings icon
+    pygame.draw.rect(screen, (30, 30, 40), settings_icon_rect)
+    pygame.draw.circle(screen, (200, 200, 200), settings_icon_rect.center, 12, 2)
+    # small gear teeth representation
+    for i in range(6):
+        ang = i * (2 * np.pi / 6)
+        x = settings_icon_rect.centerx + int(14 * np.cos(ang))
+        y = settings_icon_rect.centery + int(14 * np.sin(ang))
+        pygame.draw.circle(screen, (200,200,200), (x,y), 2)
+
     # 2. Draw Game Elements
     if game_state == "START":
         title_font, info_font = pygame.font.SysFont(None, 72), pygame.font.SysFont(None, 36)
@@ -211,14 +284,39 @@ while running:
         screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//3))
         screen.blit(info_text, (WIDTH//2 - info_text.get_width()//2, HEIGHT//2))
     elif game_state == "PLAYING":
-        for plat in platforms: pygame.draw.rect(screen, (255, 220, 0), plat)
+        for plat in platforms:
+            pygame.draw.rect(screen, (255, 220, 0), plat)
         pygame.draw.rect(screen, (255, 100, 180), (int(player_x), int(player_y), player_w, player_h))
         vol_pct = min(1.0, current_rms / 0.02)
-        pygame.draw.rect(screen, (40,40,40), (10, 10, 200, 16))
-        pygame.draw.rect(screen, (100, 255, 180), (10, 10, int(200 * vol_pct), 16))
+
+        # Draw RMS volume bar (moved down to avoid overlap)
+        pygame.draw.rect(screen, (40,40,40), volume_bar_rect)
+        pygame.draw.rect(screen, (100, 255, 180), (volume_bar_rect.left, volume_bar_rect.top, int(volume_bar_rect.width * vol_pct), volume_bar_rect.height))
+
+        # Display current input gain and draw handle on RMS bar to reflect input_gain
+        with lock:
+            g_display = input_gain
+        screen.blit(FONT.render(f"Gain: {g_display:.2f}x", True, (220,220,255)), gain_label_pos)
+        handle_x_bar = int(volume_bar_rect.left + (g_display / 5.0) * volume_bar_rect.width)
+        handle_y_bar = volume_bar_rect.centery
+        pygame.draw.circle(screen, (200,200,160), (handle_x_bar, handle_y_bar), slider_handle_radius)
+
+        # If settings open, draw slider UI
+        if settings_open:
+            pygame.draw.rect(screen, (20,20,30), settings_rect)
+            # Slider background inside settings panel
+            pygame.draw.rect(screen, (60,60,70), slider_rect)
+            # Handle position based on gain (0..5)
+            handle_x = int(slider_rect.left + (g_display / 5.0) * slider_rect.width)
+            handle_y = slider_rect.centery
+            pygame.draw.circle(screen, (180, 220, 200), (handle_x, handle_y), slider_handle_radius)
+            # Label
+            screen.blit(FONT.render(f"Input Gain: {g_display:.2f}x", True, (220,220,255)), (slider_rect.left, slider_rect.top - 22))
+
         score_text = FONT.render(f"Score: {score}", True, (220, 220, 255))
         screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
-        screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump.", True, (220, 220, 255)), (10, 40))
+        # Instructions moved below the volume bar; click anywhere to start or click/drag the volume bar to adjust gain
+        screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump. Click to start. Drag bar to edit gain.", True, (220, 220, 255)), instructions_pos)
     elif game_state == "GAME_OVER":
         title_font, score_font, info_font = pygame.font.SysFont(None, 72), pygame.font.SysFont(None, 48), pygame.font.SysFont(None, 36)
         title_text, score_text_val, info_text = title_font.render("Game Over", True, (255, 100, 180)), score_font.render(f"Final Score: {score}", True, (220, 220, 255)), info_font.render("Press any key to play again", True, (180, 180, 220))
