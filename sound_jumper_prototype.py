@@ -15,6 +15,7 @@ def audio_callback(indata, frames, time_info, status):
     global volume_rms
     if status:
         pass
+    # 计算 RMS (均方根) 作为音量
     mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata
     rms = np.sqrt(np.mean(mono.astype(np.float64)**2))
     with lock:
@@ -28,6 +29,9 @@ def start_audio_stream():
 
 # ---------- Pygame 游戏设置 ----------
 pygame.init()
+# 初始化 Pygame 混音器（为未来的音效做准备）
+pygame.mixer.init() 
+
 WIDTH, HEIGHT = 480, 720
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Sound Jumper - Endless")
@@ -45,25 +49,53 @@ speed = 5
 
 # 物理
 gravity = 0.6
+PLATFORM_FALL_SPEED = 10 # 平台破碎后的下坠速度
 
 # 音量 → 跳跃力 映射参数
 VOLUME_THRESHOLD = 0.003
 VOLUME_SENSITIVITY = 2000
+BOUNCE_MULTIPLIER = 2.0 # 弹跳平台修正系数
 
 # 平台
 platforms = []
 PLATFORM_WIDTH, PLATFORM_HEIGHT = 100, 12
+NORMAL_PLATFORM_COLOR = (180, 180, 100)
+BOUNCE_PLATFORM_COLOR = (255, 165, 0) # 橙色
+BROKEN_PLATFORM_COLOR = (80, 80, 80) # 灰色
+
+# 障碍物
+hazards = []
+HAZARD_COLOR = (255, 0, 0) # 红色
+HAZARD_SIZE = 10
+HAZARD_SPEED = 3
 
 def generate_initial_platforms():
     """Generates the starting platforms and resets the list."""
     global platforms
     platforms.clear()
-    platforms.append(pygame.Rect(WIDTH // 2 - 50, HEIGHT - 100, 100, 12))
+    
+    # 平台结构: (pygame.Rect, is_bouncing: bool, is_broken: bool, is_falling: bool)
+    # 初始平台
+    platforms.append((pygame.Rect(WIDTH // 2 - 50, HEIGHT - 100, 100, 12), False, False, False))
     y = HEIGHT - 250
+    
     while y > -HEIGHT:
         x = random.randint(0, WIDTH - PLATFORM_WIDTH)
-        platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
+        # 随机决定是否为弹跳平台 (25% 的概率)
+        is_bouncing = random.random() < 0.25
+        # 存储为元组 (Rect, is_bouncing, is_broken=False, is_falling=False)
+        platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_bouncing, False, False))
         y -= random.randint(80, 120)
+
+def generate_hazard(highest_y):
+    """Generates a new hazard particle above the highest platform."""
+    # 随机生成在屏幕宽度内，并在最高平台y坐标上方随机位置
+    x = random.randint(0, WIDTH)
+    y = highest_y - random.randint(100, 300) 
+    
+    # 障碍物结构: (pygame.Rect, velocity_x: float)
+    vx = random.choice([-HAZARD_SPEED, HAZARD_SPEED]) # 随机左右移动
+    hazards.append((pygame.Rect(x, y, HAZARD_SIZE, HAZARD_SIZE), vx))
 
 generate_initial_platforms()
 
@@ -92,10 +124,12 @@ while running:
             scroll = 0
             is_jumping = False
             generate_initial_platforms()
+            hazards.clear() # 清空障碍物
             game_state = "PLAYING"
 
     # --- State Machine ---
     if game_state == "START":
+        # ... (START 状态渲染保持不变)
         screen.fill((20, 24, 30))
         title_font = pygame.font.SysFont(None, 72)
         info_font = pygame.font.SysFont(None, 36)
@@ -132,66 +166,161 @@ while running:
         
         player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
         
-        # --- Collision Detection (Corrected) ---
-        standing_on = None
-        if velocity_y >= 0:  # Only check for landing when falling
-            for plat in platforms:
-                # Check if the player is colliding AND their bottom is near the platform's top
-                if player_rect.colliderect(plat) and abs(player_rect.bottom - plat.top) < velocity_y + 1:
-                    standing_on = plat
-                    break
+        # --- 平台碰撞和破碎逻辑 ---
+        standing_on_platform = None
+        is_on_bouncy_platform = False
         
-        if standing_on:
-            player_y = standing_on.top - player_h # Snap to top of platform
-            velocity_y = 0
-            is_jumping = False
+        if velocity_y >= 0:  # 仅在下落时检查
+            new_platforms = []
+            platform_landed_index = -1
+            
+            for i, (plat_rect, is_bouncing, is_broken, is_falling) in enumerate(platforms):
+                
+                if not is_falling and player_rect.colliderect(plat_rect) and abs(player_rect.bottom - plat_rect.top) < velocity_y + 1:
+                    # 发生在未破碎且未下坠的平台上的碰撞
+                    standing_on_platform = plat_rect
+                    is_on_bouncy_platform = is_bouncing 
+                    platform_landed_index = i # 记录索引
+
+                    # 平台破碎逻辑 (非弹跳平台，且玩家是主动踩上去的)
+                    if not is_bouncing:
+                        platforms[i] = (plat_rect, is_bouncing, True, True) # 标记为破碎并开始下坠
+                    
+                    break
+            
+            # 如果站在平台上，则修正玩家位置和速度
+            if standing_on_platform:
+                player_y = standing_on_platform.top - player_h # Snap to top of platform
+                velocity_y = 0
+                is_jumping = False
+            else:
+                # 平台破碎/下坠处理
+                velocity_y += gravity
         else:
-            # Apply gravity if not on a platform
+            # 应用重力
             velocity_y += gravity
 
-        # Jump Logic
-        if standing_on and jump_force > 1.0 and not is_jumping:
-            velocity_y = - (6 + jump_force)
+        # Jump Logic (保持不变)
+        base_jump_vel = - (6 + jump_force)
+        
+        if standing_on_platform and jump_force > 1.0 and not is_jumping:
+            if is_on_bouncy_platform:
+                velocity_y = base_jump_vel * BOUNCE_MULTIPLIER
+            else:
+                velocity_y = base_jump_vel
+                
             is_jumping = True
+        
+        # 弹跳平台自动弹跳 
+        if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
+             velocity_y = - (12) 
+             is_jumping = True
 
-        # --- Screen Scrolling ---
+
+        # --- 障碍物碰撞检测 ---
+        for hazard_rect, _ in hazards:
+            if player_rect.colliderect(hazard_rect):
+                game_state = "GAME_OVER"
+                break # 游戏结束，跳出循环
+        
+        if game_state == "GAME_OVER":
+            continue
+
+        # --- 屏幕滚动和平台生成/更新 ---
         if player_y < HEIGHT / 2.5:
             scroll_amount = (HEIGHT / 2.5) - player_y
             player_y += scroll_amount
             scroll += scroll_amount
-            for plat in platforms:
-                plat.y += scroll_amount
             
-            platforms = [p for p in platforms if p.bottom > 0 and p.top < HEIGHT]
+            # 1. 更新所有平台位置和状态
+            new_platforms = []
+            highest_platform_y = HEIGHT
+            
+            for plat_rect, is_bouncing, is_broken, is_falling in platforms:
+                
+                # 如果平台正在下坠，让它加速向下移动（独立于屏幕滚动）
+                if is_falling:
+                    plat_rect.y += PLATFORM_FALL_SPEED 
+                else:
+                    plat_rect.y += scroll_amount # 平台向下滚动
 
-            highest_platform_y = min(p.y for p in platforms) if platforms else HEIGHT
-            if len(platforms) < 15:
+                # 仅保留仍在屏幕上方或视野内的平台
+                if plat_rect.bottom > 0:
+                    new_platforms.append((plat_rect, is_bouncing, is_broken, is_falling))
+                    # 追踪当前可见的、未下坠的最高平台Y坐标
+                    if not is_falling and plat_rect.y < highest_platform_y:
+                        highest_platform_y = plat_rect.y
+            
+            platforms = new_platforms
+
+            # 2. 更新和生成障碍物
+            new_hazards = []
+            for hazard_rect, vx in hazards:
+                hazard_rect.y += scroll_amount # 障碍物随屏幕向下滚动
+                
+                # 仅保留在屏幕上方的障碍物
+                if hazard_rect.bottom > 0:
+                    new_hazards.append((hazard_rect, vx))
+            hazards = new_hazards
+            
+            # 3. 生成新的平台和障碍物
+            if len(platforms) < 10 or highest_platform_y > 0: 
                 y = highest_platform_y
+                
+                # 生成新平台
                 while y > -HEIGHT:
                     y -= random.randint(80, 120)
                     x = random.randint(0, WIDTH - PLATFORM_WIDTH)
-                    platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
-        
+                    is_bouncing = random.random() < 0.25
+                    platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_bouncing, False, False))
+                
+                # 随机生成新障碍物 (每生成一组平台，随机添加 1-2 个障碍)
+                if random.random() < 0.5:
+                    generate_hazard(highest_platform_y)
+                if random.random() < 0.2:
+                    generate_hazard(highest_platform_y - 200) # 生成得更高一点
+
+
         score = int(scroll / 10)
 
-        # --- Boundaries ---
+        # --- 障碍物移动逻辑 ---
+        for i, (hazard_rect, vx) in enumerate(hazards):
+            hazard_rect.x += vx
+            # 碰撞边界反弹
+            if hazard_rect.left < 0 or hazard_rect.right > WIDTH:
+                vx = -vx
+                hazards[i] = (hazard_rect, vx) # 更新速度
+
+        # --- Boundaries and Game Over ---
         if player_x < -player_w: player_x = WIDTH
         elif player_x > WIDTH: player_x = -player_w
         
         if player_y > HEIGHT:
             game_state = "GAME_OVER"
 
-        # --- Rendering ---
+        # --- Rendering (Updated) ---
         screen.fill((20, 24, 30))
-        for plat in platforms:
-            pygame.draw.rect(screen, (180, 180, 100), plat)
+        
+        # 绘制平台
+        for plat_rect, is_bouncing, is_broken, is_falling in platforms:
+            if is_falling:
+                color = BROKEN_PLATFORM_COLOR
+            else:
+                color = BOUNCE_PLATFORM_COLOR if is_bouncing else NORMAL_PLATFORM_COLOR
+            pygame.draw.rect(screen, color, plat_rect)
+
+        # 绘制障碍物
+        for hazard_rect, _ in hazards:
+            pygame.draw.circle(screen, HAZARD_COLOR, hazard_rect.center, HAZARD_SIZE // 2)
+
         pygame.draw.rect(screen, (200, 80, 120), (int(player_x), int(player_y), player_w, player_h))
+        
         vol_pct = min(1.0, current_rms / 0.02)
         pygame.draw.rect(screen, (40,40,40), (10, 10, 200, 16))
         pygame.draw.rect(screen, (80, 200, 120), (10, 10, int(200 * vol_pct), 16))
         score_text = FONT.render(f"Score: {score}", True, (200,200,200))
         screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
-        screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump.", True, (200,200,200)), (10, 40))
+        screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump. Orange platforms are safe.", True, (200,200,200)), (10, 40))
 
     elif game_state == "GAME_OVER":
         screen.fill((20, 24, 30))
