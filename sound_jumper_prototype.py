@@ -8,15 +8,24 @@ import random
 # ---------- 音频采样设置 ----------
 SAMPLE_RATE = 44100
 FRAME_SIZE = 1024
+
 volume_rms = 0.0
+# Input gain (multiplier applied to incoming audio). Range 0.0 .. 5.0
+input_gain = 1.0
 lock = threading.Lock()
 
 def audio_callback(indata, frames, time_info, status):
     global volume_rms
     if status:
+        # ignore status messages for now
         pass
-    # 计算 RMS (均方根) 作为音量
+    # Convert to mono
     mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata
+    # Read gain in a thread-safe way and apply
+    with lock:
+        g = input_gain
+    mono = mono * g
+    # Compute RMS (root mean square)
     rms = np.sqrt(np.mean(mono.astype(np.float64)**2))
     with lock:
         volume_rms = rms
@@ -105,6 +114,15 @@ is_jumping = False
 scroll = 0
 game_state = "START" # Can be "START", "PLAYING", "GAME_OVER"
 
+# Settings / UI defaults for input gain control
+settings_open = False
+settings_icon_rect = pygame.Rect(10, 10, 32, 32)
+volume_bar_rect = pygame.Rect(10, 50, 200, 16)
+settings_rect = pygame.Rect(WIDTH - 320, 10, 300, 80)
+slider_rect = pygame.Rect(settings_rect.left + 16, settings_rect.top + 36, settings_rect.width - 32, 10)
+slider_handle_radius = 8
+dragging_slider = False
+
 # 启动音频线程/流
 audio_stream = start_audio_stream()
 
@@ -114,18 +132,68 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        # Handle input to start/restart the game
-        if (game_state == "START" or game_state == "GAME_OVER") and event.type == pygame.KEYDOWN:
-            # Reset all game variables for a fresh start
-            player_x = WIDTH//2 - player_w//2
-            player_y = HEIGHT - 200
-            player_vx = velocity_y = 0
-            score = 0
-            scroll = 0
-            is_jumping = False
-            generate_initial_platforms()
-            hazards.clear() # 清空障碍物
-            game_state = "PLAYING"
+        # Mouse controls for settings / gain
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            mx, my = event.pos
+            # Toggle settings icon if clicked (top-left)
+            try:
+                if settings_icon_rect.collidepoint(mx, my):
+                    settings_open = not settings_open
+            except NameError:
+                # settings not yet initialized; initialize defaults now
+                settings_open = False
+                settings_icon_rect = pygame.Rect(10, 10, 32, 32)
+                volume_bar_rect = pygame.Rect(10, 50, 200, 16)
+                settings_rect = pygame.Rect(WIDTH - 320, 10, 300, 80)
+                slider_rect = pygame.Rect(settings_rect.left + 16, settings_rect.top + 36, settings_rect.width - 32, 10)
+                slider_handle_radius = 8
+                dragging_slider = False
+                if settings_icon_rect.collidepoint(mx, my):
+                    settings_open = not settings_open
+            # Click on the RMS HUD bar to set gain quickly
+            if 'volume_bar_rect' in globals() and volume_bar_rect.collidepoint(mx, my):
+                rel = (mx - volume_bar_rect.left) / volume_bar_rect.width
+                rel = max(0.0, min(1.0, rel))
+                with lock:
+                    input_gain = rel * 5.0
+                dragging_slider = True
+            # Click inside settings slider to begin dragging
+            if 'settings_open' in globals() and settings_open and slider_rect.collidepoint(mx, my):
+                dragging_slider = True
+
+        if event.type == pygame.MOUSEBUTTONUP:
+            dragging_slider = False
+
+        if event.type == pygame.MOUSEMOTION and 'dragging_slider' in globals() and dragging_slider:
+            mx, my = event.pos
+            if 'settings_open' in globals() and settings_open:
+                left = slider_rect.left
+                width = slider_rect.width
+            else:
+                left = volume_bar_rect.left
+                width = volume_bar_rect.width
+            rel = (mx - left) / width
+            rel = max(0.0, min(1.0, rel))
+            with lock:
+                input_gain = rel * 5.0
+
+        # Handle keyboard input
+        if event.type == pygame.KEYDOWN:
+            # If settings panel is open (paused), pressing any key should close it and resume
+            if settings_open:
+                settings_open = False
+            # If on the START or GAME_OVER screen and settings not open, start/restart the game
+            elif (game_state == "START" or game_state == "GAME_OVER"):
+                # Reset all game variables for a fresh start
+                player_x = WIDTH//2 - player_w//2
+                player_y = HEIGHT - 200
+                player_vx = velocity_y = 0
+                score = 0
+                scroll = 0
+                is_jumping = False
+                generate_initial_platforms()
+                hazards.clear() # 清空障碍物
+                game_state = "PLAYING"
 
     # --- State Machine ---
     if game_state == "START":
@@ -150,153 +218,159 @@ while running:
         else:
             player_vx = 0
 
-        # 获取当前音量
+        # 获取当前音量 (HUD still updates while paused)
         with lock:
             current_rms = volume_rms
 
-        jump_force = 0.0
-        if current_rms > VOLUME_THRESHOLD:
-            jump_force = (current_rms - VOLUME_THRESHOLD) * VOLUME_SENSITIVITY
-            if jump_force > 18:
-                jump_force = 18
+        # If settings panel is open, pause gameplay updates so the player can tune settings.
+        paused = settings_open
 
-        # --- Physics Update ---
-        player_x += player_vx
-        player_y += velocity_y
-        
-        player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
-        
-        # --- 平台碰撞和破碎逻辑 ---
-        standing_on_platform = None
-        is_on_bouncy_platform = False
-        
-        if velocity_y >= 0:  # 仅在下落时检查
-            new_platforms = []
-            platform_landed_index = -1
+        # Only run gameplay updates while not paused
+        if not paused:
+            jump_force = 0.0
+            if current_rms > VOLUME_THRESHOLD:
+                jump_force = (current_rms - VOLUME_THRESHOLD) * VOLUME_SENSITIVITY
+                if jump_force > 18:
+                    jump_force = 18
+
+            # --- Physics Update ---
+            player_x += player_vx
+            player_y += velocity_y
             
-            for i, (plat_rect, is_bouncing, is_broken, is_falling) in enumerate(platforms):
+            player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
+            
+            # --- 平台碰撞和破碎逻辑 ---
+            standing_on_platform = None
+            is_on_bouncy_platform = False
+            
+            if velocity_y >= 0:  # 仅在下落时检查
+                new_platforms = []
+                platform_landed_index = -1
                 
-                if not is_falling and player_rect.colliderect(plat_rect) and abs(player_rect.bottom - plat_rect.top) < velocity_y + 1:
-                    # 发生在未破碎且未下坠的平台上的碰撞
-                    standing_on_platform = plat_rect
-                    is_on_bouncy_platform = is_bouncing 
-                    platform_landed_index = i # 记录索引
-
-                    # 平台破碎逻辑 (非弹跳平台，且玩家是主动踩上去的)
-                    if not is_bouncing:
-                        platforms[i] = (plat_rect, is_bouncing, True, True) # 标记为破碎并开始下坠
+                for i, (plat_rect, is_bouncing, is_broken, is_falling) in enumerate(platforms):
                     
-                    break
-            
-            # 如果站在平台上，则修正玩家位置和速度
-            if standing_on_platform:
-                player_y = standing_on_platform.top - player_h # Snap to top of platform
-                velocity_y = 0
-                is_jumping = False
-            else:
-                # 平台破碎/下坠处理
-                velocity_y += gravity
-        else:
-            # 应用重力
-            velocity_y += gravity
+                    if not is_falling and player_rect.colliderect(plat_rect) and abs(player_rect.bottom - plat_rect.top) < velocity_y + 1:
+                        # 发生在未破碎且未下坠的平台上的碰撞
+                        standing_on_platform = plat_rect
+                        is_on_bouncy_platform = is_bouncing 
+                        platform_landed_index = i # 记录索引
 
-        # Jump Logic (保持不变)
-        base_jump_vel = - (6 + jump_force)
-        
-        if standing_on_platform and jump_force > 1.0 and not is_jumping:
-            if is_on_bouncy_platform:
-                velocity_y = base_jump_vel * BOUNCE_MULTIPLIER
-            else:
-                velocity_y = base_jump_vel
+                        # 平台破碎逻辑 (非弹跳平台，且玩家是主动踩上去的)
+                        if not is_bouncing:
+                            platforms[i] = (plat_rect, is_bouncing, True, True) # 标记为破碎并开始下坠
+                        
+                        break
                 
-            is_jumping = True
-        
-        # 弹跳平台自动弹跳 
-        if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
-             velocity_y = - (12) 
-             is_jumping = True
-
-
-        # --- 障碍物碰撞检测 ---
-        for hazard_rect, _ in hazards:
-            if player_rect.colliderect(hazard_rect):
-                game_state = "GAME_OVER"
-                break # 游戏结束，跳出循环
-        
-        if game_state == "GAME_OVER":
-            continue
-
-        # --- 屏幕滚动和平台生成/更新 ---
-        if player_y < HEIGHT / 2.5:
-            scroll_amount = (HEIGHT / 2.5) - player_y
-            player_y += scroll_amount
-            scroll += scroll_amount
-            
-            # 1. 更新所有平台位置和状态
-            new_platforms = []
-            highest_platform_y = HEIGHT
-            
-            for plat_rect, is_bouncing, is_broken, is_falling in platforms:
-                
-                # 如果平台正在下坠，让它加速向下移动（独立于屏幕滚动）
-                if is_falling:
-                    plat_rect.y += PLATFORM_FALL_SPEED 
+                # 如果站在平台上，则修正玩家位置和速度
+                if standing_on_platform:
+                    player_y = standing_on_platform.top - player_h # Snap to top of platform
+                    velocity_y = 0
+                    is_jumping = False
                 else:
-                    plat_rect.y += scroll_amount # 平台向下滚动
+                    # 平台破碎/下坠处理
+                    velocity_y += gravity
+            else:
+                # 应用重力
+                velocity_y += gravity
 
-                # 仅保留仍在屏幕上方或视野内的平台
-                if plat_rect.bottom > 0:
-                    new_platforms.append((plat_rect, is_bouncing, is_broken, is_falling))
-                    # 追踪当前可见的、未下坠的最高平台Y坐标
-                    if not is_falling and plat_rect.y < highest_platform_y:
-                        highest_platform_y = plat_rect.y
+            # Jump Logic (保持不变)
+            base_jump_vel = - (6 + jump_force)
             
-            platforms = new_platforms
-
-            # 2. 更新和生成障碍物
-            new_hazards = []
-            for hazard_rect, vx in hazards:
-                hazard_rect.y += scroll_amount # 障碍物随屏幕向下滚动
-                
-                # 仅保留在屏幕上方的障碍物
-                if hazard_rect.bottom > 0:
-                    new_hazards.append((hazard_rect, vx))
-            hazards = new_hazards
+            if standing_on_platform and jump_force > 1.0 and not is_jumping:
+                if is_on_bouncy_platform:
+                    velocity_y = base_jump_vel * BOUNCE_MULTIPLIER
+                else:
+                    velocity_y = base_jump_vel
+                    
+                is_jumping = True
             
-            # 3. 生成新的平台和障碍物
-            if len(platforms) < 10 or highest_platform_y > 0: 
-                y = highest_platform_y
+            # 弹跳平台自动弹跳 
+            if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
+                 velocity_y = - (12) 
+                 is_jumping = True
+
+
+            # --- 障碍物碰撞检测 ---
+            for hazard_rect, _ in hazards:
+                if player_rect.colliderect(hazard_rect):
+                    game_state = "GAME_OVER"
+                    break # 游戏结束，跳出循环
+            
+            if game_state == "GAME_OVER":
+                # If game ended, skip further update logic and continue to rendering for GAME_OVER
+                continue
+
+            # --- 屏幕滚动和平台生成/更新 ---
+            if player_y < HEIGHT / 2.5:
+                scroll_amount = (HEIGHT / 2.5) - player_y
+                player_y += scroll_amount
+                scroll += scroll_amount
                 
-                # 生成新平台
-                while y > -HEIGHT:
-                    y -= random.randint(80, 120)
-                    x = random.randint(0, WIDTH - PLATFORM_WIDTH)
-                    is_bouncing = random.random() < 0.25
-                    platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_bouncing, False, False))
+                # 1. 更新所有平台位置和状态
+                new_platforms = []
+                highest_platform_y = HEIGHT
                 
-                # 随机生成新障碍物 (每生成一组平台，随机添加 1-2 个障碍)
-                if random.random() < 0.5:
-                    generate_hazard(highest_platform_y)
-                if random.random() < 0.2:
-                    generate_hazard(highest_platform_y - 200) # 生成得更高一点
+                for plat_rect, is_bouncing, is_broken, is_falling in platforms:
+                    
+                    # 如果平台正在下坠，让它加速向下移动（独立于屏幕滚动）
+                    if is_falling:
+                        plat_rect.y += PLATFORM_FALL_SPEED 
+                    else:
+                        plat_rect.y += scroll_amount # 平台向下滚动
+
+                    # 仅保留仍在屏幕上方或视野内的平台
+                    if plat_rect.bottom > 0:
+                        new_platforms.append((plat_rect, is_bouncing, is_broken, is_falling))
+                        # 追踪当前可见的、未下坠的最高平台Y坐标
+                        if not is_falling and plat_rect.y < highest_platform_y:
+                            highest_platform_y = plat_rect.y
+                
+                platforms = new_platforms
+
+                # 2. 更新和生成障碍物
+                new_hazards = []
+                for hazard_rect, vx in hazards:
+                    hazard_rect.y += scroll_amount # 障碍物随屏幕向下滚动
+                    
+                    # 仅保留在屏幕上方的障碍物
+                    if hazard_rect.bottom > 0:
+                        new_hazards.append((hazard_rect, vx))
+                hazards = new_hazards
+                
+                # 3. 生成新的平台和障碍物
+                if len(platforms) < 10 or highest_platform_y > 0: 
+                    y = highest_platform_y
+                    
+                    # 生成新平台
+                    while y > -HEIGHT:
+                        y -= random.randint(80, 120)
+                        x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+                        is_bouncing = random.random() < 0.25
+                        platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_bouncing, False, False))
+                    
+                    # 随机生成新障碍物 (每生成一组平台，随机添加 1-2 个障碍)
+                    if random.random() < 0.5:
+                        generate_hazard(highest_platform_y)
+                    if random.random() < 0.2:
+                        generate_hazard(highest_platform_y - 200) # 生成得更高一点
 
 
-        score = int(scroll / 10)
+            score = int(scroll / 10)
 
-        # --- 障碍物移动逻辑 ---
-        for i, (hazard_rect, vx) in enumerate(hazards):
-            hazard_rect.x += vx
-            # 碰撞边界反弹
-            if hazard_rect.left < 0 or hazard_rect.right > WIDTH:
-                vx = -vx
-                hazards[i] = (hazard_rect, vx) # 更新速度
+            # --- 障碍物移动逻辑 ---
+            for i, (hazard_rect, vx) in enumerate(hazards):
+                hazard_rect.x += vx
+                # 碰撞边界反弹
+                if hazard_rect.left < 0 or hazard_rect.right > WIDTH:
+                    vx = -vx
+                    hazards[i] = (hazard_rect, vx) # 更新速度
 
-        # --- Boundaries and Game Over ---
-        if player_x < -player_w: player_x = WIDTH
-        elif player_x > WIDTH: player_x = -player_w
-        
-        if player_y > HEIGHT:
-            game_state = "GAME_OVER"
+            # --- Boundaries and Game Over ---
+            if player_x < -player_w: player_x = WIDTH
+            elif player_x > WIDTH: player_x = -player_w
+            
+            if player_y > HEIGHT:
+                game_state = "GAME_OVER"
 
         # --- Rendering (Updated) ---
         screen.fill((20, 24, 30))
@@ -321,6 +395,32 @@ while running:
         score_text = FONT.render(f"Score: {score}", True, (200,200,200))
         screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
         screen.blit(FONT.render("A/D or ←/→ to move, make noise to jump. Orange platforms are safe.", True, (200,200,200)), (10, 40))
+
+        # --- Settings icon and gain UI ---
+        # Draw settings icon (top-left)
+        pygame.draw.rect(screen, (30, 30, 40), settings_icon_rect)
+        pygame.draw.circle(screen, (200, 200, 200), settings_icon_rect.center, 12, 2)
+        for i in range(6):
+            ang = i * (2 * np.pi / 6)
+            x = settings_icon_rect.centerx + int(14 * np.cos(ang))
+            y = settings_icon_rect.centery + int(14 * np.sin(ang))
+            pygame.draw.circle(screen, (200,200,200), (x,y), 2)
+
+        # Draw gain handle on the HUD volume bar
+        with lock:
+            g_display = input_gain
+        handle_x_bar = int(volume_bar_rect.left + (g_display / 5.0) * volume_bar_rect.width)
+        handle_y_bar = volume_bar_rect.centery
+        pygame.draw.circle(screen, (200,200,160), (handle_x_bar, handle_y_bar), slider_handle_radius)
+
+        # Draw settings panel if open
+        if settings_open:
+            pygame.draw.rect(screen, (20,20,30), settings_rect)
+            pygame.draw.rect(screen, (60,60,70), slider_rect)
+            handle_x = int(slider_rect.left + (g_display / 5.0) * slider_rect.width)
+            handle_y = slider_rect.centery
+            pygame.draw.circle(screen, (180, 220, 200), (handle_x, handle_y), slider_handle_radius)
+            screen.blit(FONT.render(f"Input Gain: {g_display:.2f}x", True, (220,220,255)), (slider_rect.left, slider_rect.top - 22))
 
     elif game_state == "GAME_OVER":
         screen.fill((20, 24, 30))
