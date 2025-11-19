@@ -106,6 +106,23 @@ def generate_hazard(highest_y):
     vx = random.choice([-HAZARD_SPEED, HAZARD_SPEED]) # 随机左右移动
     hazards.append((pygame.Rect(x, y, HAZARD_SIZE, HAZARD_SIZE), vx))
 
+def wrap_text(text, font, max_width):
+    """Simple word-wrap: returns a list of lines that fit within max_width (pixels)."""
+    words = text.split(' ')
+    lines = []
+    cur = ""
+    for w in words:
+        test = cur + (" " if cur else "") + w
+        if font.size(test)[0] <= max_width:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
 generate_initial_platforms()
 
 # Game State
@@ -122,6 +139,19 @@ settings_rect = pygame.Rect(WIDTH - 320, 10, 300, 80)
 slider_rect = pygame.Rect(settings_rect.left + 16, settings_rect.top + 36, settings_rect.width - 32, 10)
 slider_handle_radius = 8
 dragging_slider = False
+# Short grace time after spawning where the player cannot die (seconds)
+SPAWN_GRACE_DURATION = 0.5
+spawn_grace_end = 0.0
+# Start menu UI
+MENU_BUTTONS = []
+BUTTON_W, BUTTON_H = 220, 48
+menu_top = HEIGHT//2 - 90
+MENU_BUTTONS.append(("Start Game", pygame.Rect(WIDTH//2 - BUTTON_W//2, menu_top + 0 * 60, BUTTON_W, BUTTON_H)))
+MENU_BUTTONS.append(("Settings", pygame.Rect(WIDTH//2 - BUTTON_W//2, menu_top + 1 * 60, BUTTON_W, BUTTON_H)))
+MENU_BUTTONS.append(("Play Guide", pygame.Rect(WIDTH//2 - BUTTON_W//2, menu_top + 2 * 60, BUTTON_W, BUTTON_H)))
+MENU_BUTTONS.append(("Quit", pygame.Rect(WIDTH//2 - BUTTON_W//2, menu_top + 3 * 60, BUTTON_W, BUTTON_H)))
+# Guide screen flag
+show_guide = False
 
 # 启动音频线程/流
 audio_stream = start_audio_stream()
@@ -135,6 +165,38 @@ while running:
         # Mouse controls for settings / gain
         if event.type == pygame.MOUSEBUTTONDOWN:
             mx, my = event.pos
+            # Close guide if it's open and user clicks
+            if show_guide:
+                show_guide = False
+                continue
+            # If on START screen, handle menu button clicks
+            if game_state == "START":
+                for label, rect in MENU_BUTTONS:
+                    if rect.collidepoint(mx, my):
+                        if label == "Start Game":
+                            # Start the game (simulate keydown start behavior)
+                            player_vx = velocity_y = 0
+                            score = 0
+                            scroll = 0
+                            is_jumping = False
+                            generate_initial_platforms()
+                            hazards.clear()
+                            try:
+                                init_plat = platforms[0][0]
+                                player_x = init_plat.left + (init_plat.width - player_w) / 2
+                                player_y = init_plat.top - player_h
+                            except Exception:
+                                player_x = WIDTH//2 - player_w//2
+                                player_y = HEIGHT - 200
+                            spawn_grace_end = time.time() + SPAWN_GRACE_DURATION
+                            game_state = "PLAYING"
+                        elif label == "Settings":
+                            settings_open = True
+                        elif label == "Play Guide":
+                            show_guide = True
+                        elif label == "Quit":
+                            running = False
+                        break
             # Toggle settings icon if clicked (top-left)
             try:
                 if settings_icon_rect.collidepoint(mx, my):
@@ -180,33 +242,75 @@ while running:
         # Handle keyboard input
         if event.type == pygame.KEYDOWN:
             # If settings panel is open (paused), pressing any key should close it and resume
+            if show_guide:
+                show_guide = False
+                continue
+
             if settings_open:
                 settings_open = False
             # If on the START or GAME_OVER screen and settings not open, start/restart the game
             elif (game_state == "START" or game_state == "GAME_OVER"):
                 # Reset all game variables for a fresh start
-                player_x = WIDTH//2 - player_w//2
-                player_y = HEIGHT - 200
                 player_vx = velocity_y = 0
                 score = 0
                 scroll = 0
                 is_jumping = False
+                # Recreate platforms and hazards
                 generate_initial_platforms()
                 hazards.clear() # 清空障碍物
+                # Snap player to the initial platform (so they don't immediately fall)
+                try:
+                    init_plat = platforms[0][0]  # platforms store tuples (Rect, ...)
+                    player_x = init_plat.left + (init_plat.width - player_w) / 2
+                    player_y = init_plat.top - player_h
+                except Exception:
+                    # Fallback to default positions if platforms list missing
+                    player_x = WIDTH//2 - player_w//2
+                    player_y = HEIGHT - 200
+
+                # Start grace period so the player doesn't die immediately
+                spawn_grace_end = time.time() + SPAWN_GRACE_DURATION
                 game_state = "PLAYING"
 
     # --- State Machine ---
     if game_state == "START":
-        # ... (START 状态渲染保持不变)
         screen.fill((20, 24, 30))
         title_font = pygame.font.SysFont(None, 72)
-        info_font = pygame.font.SysFont(None, 36)
-        
-        title_text = title_font.render("Sound Jumper", True, (200, 200, 200))
-        info_text = info_font.render("Press any key to start", True, (150, 150, 150))
-        
-        screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//3))
-        screen.blit(info_text, (WIDTH//2 - info_text.get_width()//2, HEIGHT//2))
+        info_font = pygame.font.SysFont(None, 28)
+        title_text = title_font.render("Sound Jumper", True, (220, 220, 255))
+        screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//6))
+
+        # Draw menu buttons
+        for label, rect in MENU_BUTTONS:
+            pygame.draw.rect(screen, (40, 40, 60), rect)
+            pygame.draw.rect(screen, (120, 120, 160), rect, 2)
+            text_surf = FONT.render(label, True, (220, 220, 255))
+            screen.blit(text_surf, (rect.left + rect.width//2 - text_surf.get_width()//2, rect.top + rect.height//2 - text_surf.get_height()//2))
+
+        # If the guide screen is active, overlay guide text and a Back button
+        if show_guide:
+            guide_rect = pygame.Rect(40, 80, WIDTH - 80, HEIGHT - 160)
+            pygame.draw.rect(screen, (18, 18, 24), guide_rect)
+            pygame.draw.rect(screen, (100, 100, 140), guide_rect, 2)
+            guide_text = (
+                "How to play:\n"
+                "Use A/D or ←/→ to move left/right. Make noise into your mic to jump — louder noise = higher jump.\n"
+                "Orange platforms bounce; grey ones break. Avoid red hazards. Score increases as you ascend.\n\n"
+                "Click anywhere or press any key to go back."
+            )
+            # Render wrapped lines within guide_rect with margins
+            margin = 12
+            max_w = guide_rect.width - margin * 2
+            y = guide_rect.top + margin
+            for paragraph in guide_text.split('\n'):
+                if paragraph.strip() == "":
+                    y += FONT.get_height() // 2
+                    continue
+                lines = wrap_text(paragraph, FONT, max_w)
+                for line in lines:
+                    surf = FONT.render(line, True, (200, 200, 255))
+                    screen.blit(surf, (guide_rect.left + margin, y))
+                    y += surf.get_height() + 6
 
     elif game_state == "PLAYING":
         # 横向输入
@@ -256,7 +360,8 @@ while running:
                         platform_landed_index = i # 记录索引
 
                         # 平台破碎逻辑 (非弹跳平台，且玩家是主动踩上去的)
-                        if not is_bouncing:
+                        # Do NOT break the initial starting platform (index 0) to avoid immediate death on start
+                        if not is_bouncing and i != 0:
                             platforms[i] = (plat_rect, is_bouncing, True, True) # 标记为破碎并开始下坠
                         
                         break
@@ -293,8 +398,10 @@ while running:
             # --- 障碍物碰撞检测 ---
             for hazard_rect, _ in hazards:
                 if player_rect.colliderect(hazard_rect):
-                    game_state = "GAME_OVER"
-                    break # 游戏结束，跳出循环
+                    # Ignore hazard collisions during the spawn grace period
+                    if time.time() >= spawn_grace_end:
+                        game_state = "GAME_OVER"
+                        break # 游戏结束，跳出循环
             
             if game_state == "GAME_OVER":
                 # If game ended, skip further update logic and continue to rendering for GAME_OVER
@@ -369,7 +476,8 @@ while running:
             if player_x < -player_w: player_x = WIDTH
             elif player_x > WIDTH: player_x = -player_w
             
-            if player_y > HEIGHT:
+            # Falling below the screen causes game over, but ignore during grace
+            if player_y > HEIGHT and time.time() >= spawn_grace_end:
                 game_state = "GAME_OVER"
 
         # --- Rendering (Updated) ---
