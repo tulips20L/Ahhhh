@@ -47,7 +47,75 @@ hands = mp_hands.Hands(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
-cap = cv2.VideoCapture(0)
+
+# ========== 虚拟摄像头支持 ==========
+# 配置选项
+USE_VIRTUAL_CAMERA = False  # 设为 True 使用虚拟摄像头
+CAMERA_INDEX = 0  # 摄像头索引：0=默认, 1/2/3=其他设备（包括虚拟摄像头）
+# 常见虚拟摄像头索引：
+# - OBS Virtual Camera: 通常是 1 或 2
+# - DroidCam: 通常是 1 
+# - ManyCam: 通常是 1 或 2
+# - IP Webcam: 需要使用 URL 方式连接（见下方）
+
+# 如果使用 IP Webcam (手机摄像头)，设置这里
+USE_IP_WEBCAM = False
+IP_WEBCAM_URL = "http://192.168.1.100:8080/video"  # 替换为你的手机IP
+
+# 初始化摄像头
+cap = None
+camera_available = False
+
+if USE_IP_WEBCAM:
+    # 使用 IP Webcam
+    try:
+        cap = cv2.VideoCapture(IP_WEBCAM_URL)
+        if cap.isOpened():
+            camera_available = True
+            print(f"成功连接到 IP Webcam: {IP_WEBCAM_URL}")
+        else:
+            print(f"无法连接到 IP Webcam: {IP_WEBCAM_URL}")
+    except Exception as e:
+        print(f"IP Webcam 连接错误: {e}")
+else:
+    # 使用本地或虚拟摄像头
+    if USE_VIRTUAL_CAMERA:
+        # 尝试多个可能的虚拟摄像头索引
+        for idx in [1, 2, 3, 0]:
+            test_cap = cv2.VideoCapture(idx)
+            if test_cap.isOpened():
+                ret, frame = test_cap.read()
+                if ret and frame is not None:
+                    cap = test_cap
+                    camera_available = True
+                    print(f"成功打开虚拟摄像头 (索引 {idx})")
+                    break
+                else:
+                    test_cap.release()
+    else:
+        # 使用指定索引的摄像头
+        cap = cv2.VideoCapture(CAMERA_INDEX)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                camera_available = True
+                print(f"成功打开摄像头 (索引 {CAMERA_INDEX})")
+            else:
+                cap.release()
+                cap = None
+
+# 如果没有找到摄像头，提供键盘控制作为后备
+if not camera_available:
+    print("=" * 50)
+    print("警告：未找到可用摄像头")
+    print("手势控制不可用，将使用键盘控制：")
+    print("  A/D 或 ←/→: 左右移动")
+    print("  1: 触发救援平台（代替剪刀手）")
+    print("  2: 触发护盾（代替握拳）")
+    print("  3: 触发清屏（代替手掌）")
+    print("  声音: 仍然可以用声音跳跃")
+    print("=" * 50)
+    cap = None
 
 # 简单的手势判断函数
 def count_extended_fingers(hand_landmarks):
@@ -87,9 +155,9 @@ BIG_FONT = pygame.font.SysFont(None, 60)
 
 player_w, player_h = 40, 40
 player_x = WIDTH//2 - player_w//2
-player_y = HEIGHT - 200
+player_y = -50  # Start from above the screen
 velocity_y = 0
-gravity = 1  # 重力加速度（越大下落越快）
+gravity = 2  # 重力加速度（越大下落越快）
 PLATFORM_FALL_SPEED = 20
 
 # 音量参数
@@ -100,12 +168,16 @@ volume_sensitivity_adjusted = VOLUME_SENSITIVITY  # 可调整的版本
 
 # 技能冷却系统
 skills = {
-    "RESCUE": {"cooldown": 5.0, "last_use": 0, "color": (255, 165, 0), "name": "Rescue (V-Sign)"},
-    "SHIELD": {"cooldown": 8.0, "last_use": 0, "color": (255, 215, 0), "name": "Shield (Fist)"},
-    "BLAST":  {"cooldown": 10.0, "last_use": 0, "color": (0, 255, 255), "name": "Blast (Palm)"}
+    "RESCUE": {"cooldown": 5.0, "last_use": 0, "color": (255, 165, 0), "name": "Rescue (V-Sign/1)"},
+    "SHIELD": {"cooldown": 8.0, "last_use": 0, "color": (255, 215, 0), "name": "Shield (Fist/2)"},
+    "BLAST":  {"cooldown": 10.0, "last_use": 0, "color": (0, 255, 255), "name": "Blast (Palm/3)"}
 }
 shield_active_end = 0.0 # 护盾结束时间
 shockwave_radius = 0 # 冲击波特效半径
+
+# 键盘控制变量（无摄像头时的后备方案）
+keyboard_target_x = WIDTH // 2
+keyboard_move_speed = 10
 
 # 平台与障碍
 platforms = []
@@ -139,7 +211,9 @@ is_jumping = False
 scroll = 0
 game_state = "START" 
 hand_target_x = WIDTH // 2
-settings_selected = 0  # 0=SENSITIVITY, 1=START_GAME 
+settings_selected = 0  # 0=SENSITIVITY, 1=START_GAME
+initial_drop = True  # Flag to track if cube is still dropping to first platform
+first_input_received = False  # Flag to track if first input has been received 
 
 # UI 资源
 dim_surface = pygame.Surface((WIDTH, HEIGHT))
@@ -152,55 +226,86 @@ audio_stream = start_audio_stream()
 running = True
 while running:
     # ================= CAMERA & HAND TRACKING =================
-    success, image = cap.read()
     bg_surface = None
-    
     current_gesture = "NONE"
     
-    if success:
-        image = cv2.flip(image, 1) # 镜像翻转
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = hands.process(image_rgb)
+    if camera_available and cap is not None:
+        success, image = cap.read()
         
-        h, w, c = image.shape
-        
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # 获取 MediaPipe 的左右手标签
-                # 注意：因为我们做了 cv2.flip，所以 MediaPipe 的 "Left" 其实是用户的 "Right" (屏幕右侧)
-                label = results.multi_handedness[idx].classification[0].label
-                
-                # 计算手掌中心X坐标 (0~1)
-                hand_cx = hand_landmarks.landmark[9].x
-                
-                # 逻辑：屏幕右侧的手 (label=="Left") 控制移动，屏幕左侧的手 (label=="Right") 控制技能
-                
-                if label == "Left": # 这是用户的右手，在屏幕右侧 -> 移动控制
-                    target_raw = hand_cx * WIDTH
-                    # 稍微加点偏移，让手的位置更自然对应屏幕中心
-                    hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
+        if success:
+            image = cv2.flip(image, 1) # 镜像翻转
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            results = hands.process(image_rgb)
+            
+            h, w, c = image.shape
+            
+            if results.multi_hand_landmarks and results.multi_handedness:
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    # 获取 MediaPipe 的左右手标签
+                    # 注意：因为我们做了 cv2.flip，所以 MediaPipe 的 "Left" 其实是用户的 "Right" (屏幕右侧)
+                    label = results.multi_handedness[idx].classification[0].label
                     
-                    # 视觉反馈：绿色点
-                    cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
+                    # 计算手掌中心X坐标 (0~1)
+                    hand_cx = hand_landmarks.landmark[9].x
                     
-                elif label == "Right": # 这是用户的左手，在屏幕左侧 -> 技能控制
-                    gesture = count_extended_fingers(hand_landmarks)
-                    current_gesture = gesture
+                    # 逻辑：屏幕右侧的手 (label=="Left") 控制移动，屏幕左侧的手 (label=="Right") 控制技能
                     
-                    # 视觉反馈：显示识别到的手势文字
-                    cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
-                    cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 255), -1)
+                    if label == "Left": # 这是用户的右手，在屏幕右侧 -> 移动控制
+                        target_raw = hand_cx * WIDTH
+                        # 稍微加点偏移，让手的位置更自然对应屏幕中心
+                        hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
+                        
+                        # 视觉反馈：绿色点
+                        cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
+                        
+                    elif label == "Right": # 这是用户的左手，在屏幕左侧 -> 技能控制
+                        gesture = count_extended_fingers(hand_landmarks)
+                        current_gesture = gesture
+                        
+                        # 视觉反馈：显示识别到的手势文字
+                        cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
+                        cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 255), -1)
 
-        # 渲染背景
-        bg_image = cv2.resize(image, (WIDTH, HEIGHT))
-        bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
+            # 渲染背景
+            bg_image = cv2.resize(image, (WIDTH, HEIGHT))
+            bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
+    else:
+        # 无摄像头时使用键盘控制
+        hand_target_x = keyboard_target_x
 
     # ================= INPUT & SKILLS =================
+    keys = pygame.key.get_pressed()
+    
+    # 键盘移动控制（无摄像头时的后备）
+    if not camera_available:
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            keyboard_target_x = max(0, keyboard_target_x - keyboard_move_speed)
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            keyboard_target_x = min(WIDTH - player_w, keyboard_target_x + keyboard_move_speed)
+    
     for event in pygame.event.get():
         if event.type == pygame.QUIT: running = False
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE: running = False
+            
+            # 键盘技能触发（无摄像头时的后备）
+            if game_state == "PLAYING" and not camera_available:
+                now = time.time()
+                if event.key == pygame.K_1 and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
+                    # 触发救援平台
+                    spawn_y = min(HEIGHT-50, player_y + 100)
+                    platforms.append((pygame.Rect(player_x - 30, spawn_y, PLATFORM_WIDTH, PLATFORM_HEIGHT), True, False, False))
+                    skills["RESCUE"]["last_use"] = now
+                elif event.key == pygame.K_2 and now - skills["SHIELD"]["last_use"] > skills["SHIELD"]["cooldown"]:
+                    # 触发护盾
+                    shield_active_end = now + 3.0
+                    skills["SHIELD"]["last_use"] = now
+                elif event.key == pygame.K_3 and now - skills["BLAST"]["last_use"] > skills["BLAST"]["cooldown"]:
+                    # 触发清屏
+                    hazards.clear()
+                    shockwave_radius = 1
+                    skills["BLAST"]["last_use"] = now
             
             if game_state == "SETTINGS":
                 if event.key == pygame.K_LEFT:
@@ -214,7 +319,10 @@ while running:
                     is_jumping = False
                     generate_initial_platforms()
                     hazards.clear()
-                    player_x, player_y = WIDTH//2, HEIGHT-200
+                    player_x, player_y = WIDTH//2, -50  # Start from top
+                    keyboard_target_x = WIDTH//2  # Reset keyboard position
+                    initial_drop = True
+                    first_input_received = False
                     skills["RESCUE"]["last_use"] = 0
                     skills["SHIELD"]["last_use"] = 0
                     skills["BLAST"]["last_use"] = 0
@@ -226,9 +334,9 @@ while running:
             elif game_state == "GAME_OVER":
                 game_state = "SETTINGS"
 
-    # 技能触发逻辑
+    # 技能触发逻辑（摄像头手势）
     now = time.time()
-    if game_state == "PLAYING":
+    if game_state == "PLAYING" and camera_available:
         # 1. 剪刀手 -> 召唤平台
         if current_gesture == "VICTORY" and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
             # 在脚下生成弹跳平台
@@ -288,7 +396,16 @@ while running:
 
         # 跳跃
         base_jump = -(8 + jump_force)
-        if standing_on_platform and jump_force > 1.0 and not is_jumping:
+        
+        # Handle initial drop - first input gives high bounce
+        if initial_drop and standing_on_platform:
+            if jump_force > 1.0:
+                # First strong input - give a powerful initial bounce
+                velocity_y = -20
+                is_jumping = True
+                initial_drop = False
+                first_input_received = True
+        elif standing_on_platform and jump_force > 1.0 and not is_jumping:
             velocity_y = base_jump * BOUNCE_MULTIPLIER if is_on_bouncy_platform else base_jump
             is_jumping = True
         
@@ -353,7 +470,12 @@ while running:
         if player_y > HEIGHT: game_state = "GAME_OVER"
 
     # ================= DRAWING =================
-    if bg_surface: screen.blit(bg_surface, (0, 0))
+    if bg_surface: 
+        screen.blit(bg_surface, (0, 0))
+    else:
+        # 无摄像头时的背景
+        screen.fill((20, 20, 30))
+    
     screen.blit(dim_surface, (0, 0))
 
     if game_state == "PLAYING":
@@ -408,6 +530,11 @@ while running:
             
             ui_y += 70
 
+        # 无摄像头提示
+        if not camera_available:
+            no_cam_text = FONT.render("No Camera - Using Keyboard Controls", True, (255, 100, 100))
+            screen.blit(no_cam_text, (WIDTH//2 - no_cam_text.get_width()//2, 20))
+
         # 音量条
         vol_h = int(min(1.0, current_rms/0.02) * 200)
         pygame.draw.rect(screen, (50, 50, 50), (WIDTH-40, HEIGHT-250, 20, 200))
@@ -421,18 +548,31 @@ while running:
         title = BIG_FONT.render("DUAL HAND SOUND JUMPER", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//3))
         
-        instr = [
-            "RIGHT HAND: Move Left/Right",
-            "LEFT HAND GESTURES:",
-            "  [V-Sign] Rescue Platform",
-            "  [Fist]   Shield (Invincible)",
-            "  [Palm]   Clear Screen",
-            "VOICE: Scream to JUMP!",
-            "Press Any Key to Continue"
-        ]
+        if camera_available:
+            instr = [
+                "RIGHT HAND: Move Left/Right",
+                "LEFT HAND GESTURES:",
+                "  [V-Sign] Rescue Platform",
+                "  [Fist]   Shield (Invincible)",
+                "  [Palm]   Clear Screen",
+                "VOICE: Scream to JUMP!",
+                "Press Any Key to Continue"
+            ]
+        else:
+            instr = [
+                "NO CAMERA DETECTED - Keyboard Mode:",
+                "A/D or ←/→: Move Left/Right", 
+                "1: Rescue Platform",
+                "2: Shield (Invincible)",
+                "3: Clear Screen",
+                "VOICE: Scream to JUMP!",
+                "Press Any Key to Continue"
+            ]
+        
         y = HEIGHT//2
         for line in instr:
-            t = FONT.render(line, True, (200, 200, 200))
+            color = (255, 100, 100) if "NO CAMERA" in line else (200, 200, 200)
+            t = FONT.render(line, True, color)
             screen.blit(t, (WIDTH//2 - t.get_width()//2, y))
             y += 40
 
@@ -472,6 +612,11 @@ while running:
             screen.blit(desc_text, (WIDTH//2 - desc_text.get_width()//2, desc_y))
             desc_y += 30
         
+        # Camera status
+        if not camera_available:
+            cam_status = FONT.render("Camera: Not Available (Using Keyboard)", True, (255, 100, 100))
+            screen.blit(cam_status, (WIDTH//2 - cam_status.get_width()//2, desc_y + 20))
+        
         # Start game instruction
         start_text = FONT.render("Press ENTER or SPACE to Start Game", True, (100, 255, 100))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 100))
@@ -490,5 +635,6 @@ while running:
 # 清理
 audio_stream.stop()
 audio_stream.close()
-cap.release()
+if cap is not None:
+    cap.release()
 pygame.quit()
