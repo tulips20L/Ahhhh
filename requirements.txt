@@ -3,4 +3,5 @@ numpy==2.3.4
 sounddevice==0.5.3
 cffi==2.0.0
 pycparser==2.23
-pip install opencv-python mediapipe
+opencv-python
+mediapipe
