@@ -545,7 +545,7 @@ while running:
         screen.blit(score_surf, (WIDTH//2 - score_surf.get_width()//2, 50))
 
     elif game_state == "START":
-        title = BIG_FONT.render("DUAL HAND SOUND JUMPER", True, (255, 255, 255))
+        title = BIG_FONT.render("SOUND JUMPER", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//3))
         
         if camera_available:
@@ -582,7 +582,7 @@ while running:
         
         # Volume Sensitivity Slider
         setting_y = HEIGHT//2 - 50
-        label = FONT.render("Voice Sensitivity (← → to adjust):", True, (255, 255, 255))
+        label = FONT.render("Voice Sensitivity (⬅️ ➡️ to adjust):", True, (255, 255, 255))
         screen.blit(label, (WIDTH//2 - label.get_width()//2, setting_y))
         
         # Draw slider
