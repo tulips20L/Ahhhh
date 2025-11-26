@@ -100,43 +100,36 @@ current_frame_index = 0
 
 try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # 请确认图片名为 character_sheet.png
     image_path = os.path.join(script_dir, "character_sheet.png") 
     
     if not os.path.exists(image_path):
-        print(f"❌ 找不到图片: {image_path}")
-        print("请将您的 48x48 序列帧重命名为 character_sheet.png 并放在同一目录下")
+        # 即使找不到图片也不报错，只打印提示
+        print(f"提示: 未找到 {image_path}，将使用默认方块。")
     else:
         sprite_sheet = pygame.image.load(image_path).convert_alpha()
         sheet_width = sprite_sheet.get_width()
-        
-        # 强制设定每帧 48x48
         FRAME_W = 48
         FRAME_H = 48
-        
-        # 自动计算有多少帧
         FRAME_COUNT = sheet_width // FRAME_W
         print(f"加载成功：{sheet_width}x{sprite_sheet.get_height()}，包含 {FRAME_COUNT} 帧")
 
         animation_frames = []
         for i in range(FRAME_COUNT):
             frame_surf = sprite_sheet.subsurface((i * FRAME_W, 0, FRAME_W, FRAME_H))
-            # 缩放至 48x48 (其实保持原大即可，稍微大过判定框 40x40)
             scaled_frame = pygame.transform.scale(frame_surf, (48, 48))
             animation_frames.append(scaled_frame)
         
         if len(animation_frames) > 0:
             sprite_loaded = True
-        else:
-            print("图片宽度不足 48px，无法切割")
 
 except Exception as e:
     print(f"加载出错: {e}")
     sprite_loaded = False
 # ====================================================
 
-VOLUME_THRESHOLD = 0.003
-VOLUME_SENSITIVITY = 2000
+# [修改 1] 声音参数调整：更低的阈值，更高的灵敏度
+VOLUME_THRESHOLD = 0.001       # 原 0.003 -> 0.001 (更容易捕捉细微声音)
+VOLUME_SENSITIVITY = 4000      # 原 2000 -> 4000 (默认放大倍数增加)
 BOUNCE_MULTIPLIER = 2.0
 volume_sensitivity_adjusted = VOLUME_SENSITIVITY
 
@@ -159,6 +152,7 @@ HAZARD_SIZE, HAZARD_SPEED = 15, 10
 def generate_initial_platforms():
     global platforms
     platforms.clear()
+    # 初始平台确保在正中间
     platforms.append((pygame.Rect(WIDTH // 2 - 50, HEIGHT - 150, 100, 15), True, False, False))
     y = HEIGHT - 300
     while y > -HEIGHT:
@@ -209,6 +203,7 @@ while running:
                     
                     if label == "Left": 
                         target_raw = hand_cx * WIDTH
+                        # 只有在非 initial_drop 状态下，才更新目标位置
                         hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
                         cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
                     elif label == "Right":
@@ -219,6 +214,18 @@ while running:
             bg_image = cv2.resize(image, (WIDTH, HEIGHT))
             bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
     else:
+        # 键盘模式下，target_x 由按键更新
+        pass
+
+    # [修改 2] 强制居中逻辑
+    # 如果处于初始下落阶段 (initial_drop 为 True)，强制让目标 X 坐标回到屏幕中心
+    # 这样无论摄像头捕捉到手在哪里，角色都会直直地掉下来
+    if initial_drop:
+        hand_target_x = WIDTH // 2 - player_w // 2
+        keyboard_target_x = WIDTH // 2 - player_w // 2
+
+    # 如果没有摄像头，更新键盘目标
+    if not camera_available and not initial_drop:
         hand_target_x = keyboard_target_x
 
     keys = pygame.key.get_pressed()
@@ -246,16 +253,21 @@ while running:
                     skills["BLAST"]["last_use"] = now
             
             if game_state == "SETTINGS":
-                if event.key == pygame.K_LEFT: volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - 200)
-                elif event.key == pygame.K_RIGHT: volume_sensitivity_adjusted = min(4000, volume_sensitivity_adjusted + 200)
+                if event.key == pygame.K_LEFT: volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - 500)
+                # [修改 3] 设置中允许更大的灵敏度上限 (4000 -> 8000)
+                elif event.key == pygame.K_RIGHT: volume_sensitivity_adjusted = min(8000, volume_sensitivity_adjusted + 500)
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
                     player_vx = velocity_y = 0
                     score = scroll = 0
                     is_jumping = False
                     generate_initial_platforms()
                     hazards.clear()
-                    player_x, player_y = WIDTH//2, -50
-                    keyboard_target_x = WIDTH//2
+                    
+                    # 确保重置时也是居中
+                    player_x = WIDTH // 2 - player_w // 2 
+                    player_y = -50
+                    keyboard_target_x = WIDTH // 2 - player_w // 2
+                    
                     initial_drop = True
                     skills["RESCUE"]["last_use"] = 0
                     skills["SHIELD"]["last_use"] = 0
@@ -283,8 +295,12 @@ while running:
         player_x += (hand_target_x - player_x) * 0.2
         with lock: current_rms = volume_rms
         jump_force = 0.0
+        
+        # [修改 4] 声音跳跃逻辑加强
         if current_rms > VOLUME_THRESHOLD:
-            jump_force = min(18, (current_rms - VOLUME_THRESHOLD) * volume_sensitivity_adjusted)
+            # 计算力度，并设置更高的上限 (25) 
+            raw_force = (current_rms - VOLUME_THRESHOLD) * volume_sensitivity_adjusted
+            jump_force = min(25, raw_force) 
 
         player_y += velocity_y
         player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
@@ -310,12 +326,15 @@ while running:
         else:
             velocity_y += gravity
 
-        base_jump = -(8 + jump_force)
+        # 基础跳跃高度略微增加 (8 -> 10)
+        base_jump = -(10 + jump_force)
+        
         if initial_drop and standing_on_platform:
-            if jump_force > 1.0:
-                velocity_y = -20
-                is_jumping = True
-                initial_drop = False
+            # 第一次落地，解锁左右移动
+            initial_drop = False
+            velocity_y = -20 # 第一次自动弹起
+            is_jumping = True
+                
         elif standing_on_platform and jump_force > 1.0 and not is_jumping:
             velocity_y = base_jump * BOUNCE_MULTIPLIER if is_on_bouncy_platform else base_jump
             is_jumping = True
@@ -382,14 +401,11 @@ while running:
             total_frames = len(animation_frames)
             
             if not is_jumping:
-                current_frame_index = 0 # 站立
+                current_frame_index = 0 
             else:
-                # 动态映射：将垂直速度(-15到+15)映射到剩余的帧上
-                # 进度 0.0(上升) -> 1.0(下落)
                 progress = (velocity_y + 15) / 30.0
                 progress = max(0.0, min(1.0, progress))
                 
-                # 排除第0帧(站立)，剩下帧用于空中动画
                 air_count = total_frames - 1
                 if air_count > 0:
                     offset = int(progress * (air_count - 1))
@@ -402,11 +418,9 @@ while running:
             
             char_img = animation_frames[current_frame_index]
             
-            # 翻转
             if hand_target_x < player_x - 5: 
                  char_img = pygame.transform.flip(char_img, True, False)
             
-            # 绘制 (48px图覆盖40px框，偏移4px)
             screen.blit(char_img, (int(player_x) - 4, int(player_y) - 4))
         else:
             pygame.draw.rect(screen, (200, 80, 120), (int(player_x), int(player_y), player_w, player_h))
@@ -466,9 +480,13 @@ while running:
         setting_y = HEIGHT//2 - 50
         label = FONT.render(f"Voice Sensitivity: {volume_sensitivity_adjusted}", True, (255, 255, 255))
         screen.blit(label, (WIDTH//2 - label.get_width()//2, setting_y))
+        
+        # [修改 5] 设置条显示逻辑更新以匹配新的最大值 (8000)
         pygame.draw.rect(screen, (100,100,100), (WIDTH//2-200, setting_y+60, 400, 20))
-        fill_w = int((volume_sensitivity_adjusted-500)/(3500)*400)
+        # 调整了分母 7500 (8000-500) 来适应新的范围
+        fill_w = int((volume_sensitivity_adjusted-500)/(7500)*400)
         pygame.draw.rect(screen, (0,255,100), (WIDTH//2-200, setting_y+60, fill_w, 20))
+        
         start_text = FONT.render("Press SPACE to Start", True, (100, 255, 100))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 100))
     elif game_state == "GAME_OVER":
