@@ -90,7 +90,7 @@ player_w, player_h = 40, 40
 player_x = WIDTH//2 - player_w//2
 player_y = -50
 velocity_y = 0
-gravity = 2
+gravity = 1.5
 PLATFORM_FALL_SPEED = 20
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -145,7 +145,6 @@ except Exception as e:
     print(f"背景加载出错: {e}")
 
 # 透明度设置 (摄像头权重, 背景权重)
-# 你可以调整这里：0.7 表示摄像头占 70%，0.3 表示背景占 30%
 CAMERA_WEIGHT = 0.7 
 BACKGROUND_WEIGHT = 0.3
 # ========================================
@@ -171,17 +170,26 @@ hazards = []
 PLATFORM_WIDTH, PLATFORM_HEIGHT = 120, 15
 HAZARD_SIZE, HAZARD_SPEED = 15, 10
 
+# ----------- PLATFORM WIDTH FUNCTION -----------
+def get_platform_width(y, scroll):
+    min_width = 60
+    max_width = 220
+    shrink_factor = max(0, min(1, scroll / 8000))
+    width = int(max_width - (max_width - min_width) * shrink_factor)
+    return width
+
 def generate_initial_platforms():
     global platforms
     platforms.clear()
-    start_plat_w = 200
+    start_plat_w = 220  # Larger starting platform
     platforms.append((pygame.Rect(WIDTH // 2 - start_plat_w // 2, HEIGHT - 150, start_plat_w, 15), True, False, False))
 
     y = HEIGHT - 300
     while y > -HEIGHT:
-        x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+        plat_w = get_platform_width(y, 0)  # At the start, scroll=0
+        x = random.randint(0, WIDTH - plat_w)
         is_bouncing = random.random() < 0.25
-        platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_bouncing, False, False))
+        platforms.append((pygame.Rect(x, y, plat_w, PLATFORM_HEIGHT), is_bouncing, False, False))
         y -= random.randint(80, 140)
 
 def generate_hazard(highest_y):
@@ -273,7 +281,8 @@ while running:
                 now = time.time()
                 if event.key == pygame.K_1 and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
                     spawn_y = min(HEIGHT-50, player_y + 100)
-                    platforms.append((pygame.Rect(player_x - 30, spawn_y, PLATFORM_WIDTH, PLATFORM_HEIGHT), True, False, False))
+                    plat_w = get_platform_width(spawn_y, scroll)
+                    platforms.append((pygame.Rect(int(player_x + player_w/2 - plat_w/2), spawn_y, plat_w, PLATFORM_HEIGHT), True, False, False))
                     skills["RESCUE"]["last_use"] = now
                 elif event.key == pygame.K_2 and now - skills["SHIELD"]["last_use"] > skills["SHIELD"]["cooldown"]:
                     shield_active_end = now + 3.0
@@ -308,7 +317,8 @@ while running:
     if game_state == "PLAYING" and camera_available:
         if current_gesture == "VICTORY" and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
             spawn_y = min(HEIGHT-50, player_y + 100)
-            platforms.append((pygame.Rect(player_x - 30, spawn_y, PLATFORM_WIDTH, PLATFORM_HEIGHT), True, False, False))
+            plat_w = get_platform_width(spawn_y, scroll)
+            platforms.append((pygame.Rect(int(player_x + player_w/2 - plat_w/2), spawn_y, plat_w, PLATFORM_HEIGHT), True, False, False))
             skills["RESCUE"]["last_use"] = now
         if current_gesture == "FIST" and now - skills["SHIELD"]["last_use"] > skills["SHIELD"]["cooldown"]:
             shield_active_end = now + 3.0
@@ -393,9 +403,10 @@ while running:
                 y = highest_y
                 while y > -HEIGHT:
                     y -= random.randint(100, 180)
-                    x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+                    plat_w = get_platform_width(y, scroll)
+                    x = random.randint(0, WIDTH - plat_w)
                     is_b = random.random() < 0.25
-                    platforms.append((pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT), is_b, False, False))
+                    platforms.append((pygame.Rect(x, y, plat_w, PLATFORM_HEIGHT), is_b, False, False))
                 if random.random() < 0.6: generate_hazard(highest_y)
 
         for i, (r, v) in enumerate(hazards):
