@@ -15,7 +15,7 @@ pygame.mixer.init()
 info = pygame.display.Info()
 WIDTH, HEIGHT = info.current_w, info.current_h
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
-pygame.display.set_caption("Sound Jumper - 48x48 Edition")
+pygame.display.set_caption("Sound Jumper - Final")
 
 # ---------- 2. 音频处理 ----------
 SAMPLE_RATE = 44100
@@ -66,30 +66,19 @@ try:
 except: pass
 
 def count_extended_fingers(hand_landmarks):
-    """
-    Counts extended fingers based on landmark positions.
-    Returns "FIST", "PALM", "VICTORY", or "UNKNOWN".
-    """
     TIPS = [4, 8, 12, 16, 20]
     PIPS = [2, 6, 10, 14, 18]
     extended = [0, 0, 0, 0, 0]
-
-    # For fingers (Index to Pinky)
     for i in range(1, 5):
         if hand_landmarks.landmark[TIPS[i]].y < hand_landmarks.landmark[PIPS[i]].y:
             extended[i] = 1
-
-    # For Thumb
     if hand_landmarks.landmark[TIPS[0]].x < hand_landmarks.landmark[PIPS[0]].x:
         extended[0] = 1
-
     count = sum(extended)
-
     if count >= 4: return "PALM"
     if count <= 1: return "FIST"
     if extended[1] and extended[2] and not extended[0] and not extended[3] and not extended[4]:
         return "VICTORY"
-
     return "UNKNOWN"
 
 # ---------- 4. 游戏变量 ----------
@@ -161,6 +150,8 @@ def generate_initial_platforms():
     global platforms
     platforms.clear()
     start_plat_w = 200
+    # 【需求实现 1：橙色弹跳平台】
+    # 第二个参数设置为 True (is_bouncing)，这会让平台在绘制时变成橙色，并具有弹跳属性
     platforms.append((pygame.Rect(WIDTH // 2 - start_plat_w // 2, HEIGHT - 150, start_plat_w, 15), True, False, False))
 
     y = HEIGHT - 300
@@ -183,7 +174,7 @@ is_jumping = False
 scroll = 0
 game_state = "START"
 hand_target_x = WIDTH // 2
-initial_drop = True
+initial_drop = True # 核心标记：是否处于开局下落状态
 
 dim_surface = pygame.Surface((WIDTH, HEIGHT))
 dim_surface.set_alpha(160)
@@ -197,6 +188,7 @@ while running:
     bg_surface = None
     current_gesture = "NONE"
 
+    # 1. 获取摄像头输入
     if camera_available and cap is not None:
         success, image = cap.read()
         if success:
@@ -212,6 +204,7 @@ while running:
 
                     if label == "Left":
                         target_raw = hand_cx * WIDTH
+                        # 更新手部目标，但在 initial_drop 时会被覆盖
                         hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
                         cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
                     elif label == "Right":
@@ -222,18 +215,22 @@ while running:
             bg_image = cv2.resize(image, (WIDTH, HEIGHT))
             bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
 
-    if initial_drop:
-        hand_target_x = WIDTH // 2 - player_w // 2
-        keyboard_target_x = WIDTH // 2 - player_w // 2
-
-    if not camera_available and not initial_drop:
-        hand_target_x = keyboard_target_x
-
+    # 2. 获取键盘输入
     keys = pygame.key.get_pressed()
     if not camera_available:
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: keyboard_target_x = max(0, keyboard_target_x - keyboard_move_speed)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: keyboard_target_x = min(WIDTH - player_w, keyboard_target_x + keyboard_move_speed)
 
+    # 3. 【需求实现 2：强制锁定逻辑】
+    # 这一步必须放在所有输入获取之后，确保覆盖掉任何移动指令
+    if initial_drop:
+        hand_target_x = WIDTH // 2 - player_w // 2
+        keyboard_target_x = WIDTH // 2 - player_w // 2
+
+    if not camera_available:
+        hand_target_x = keyboard_target_x
+
+    # ------------------ 事件处理 ------------------
     for event in pygame.event.get():
         if event.type == pygame.QUIT: running = False
         if event.type == pygame.KEYDOWN:
@@ -263,15 +260,18 @@ while running:
                     player_x = WIDTH // 2 - player_w // 2
                     player_y = -50
                     keyboard_target_x = WIDTH // 2 - player_w // 2
-                    initial_drop = True
+                    
+                    # 重新开始时，重置锁定状态
+                    initial_drop = True 
+                    
                     for skill in skills.values(): skill['last_use'] = 0
                     game_state = "PLAYING"
             elif game_state == "START": game_state = "SETTINGS"
             elif game_state == "GAME_OVER": game_state = "SETTINGS"
 
-    # --- Continuous Input Logic (moved outside the event loop) ---
+    # 设置界面调节逻辑
     if game_state == "SETTINGS":
-        adjustment_speed = 25  # Controls how fast the value changes
+        adjustment_speed = 25
         if keys[pygame.K_LEFT]:
             volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - adjustment_speed)
         if keys[pygame.K_RIGHT]:
@@ -279,6 +279,7 @@ while running:
             
     now = time.time()
     if game_state == "PLAYING" and camera_available:
+        # 手势技能触发
         if current_gesture == "VICTORY" and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
             spawn_y = min(HEIGHT-50, player_y + 100)
             platforms.append((pygame.Rect(player_x - 30, spawn_y, PLATFORM_WIDTH, PLATFORM_HEIGHT), True, False, False))
@@ -329,9 +330,10 @@ while running:
 
         base_jump = -(10 + jump_force)
 
+        # 【核心逻辑：解除控制锁定】
         if initial_drop and standing_on_platform:
-            initial_drop = False
-            velocity_y = -20
+            initial_drop = False  # 第一次踩到平台后，解锁控制
+            velocity_y = -20      # 第一次自动弹起
             is_jumping = True
 
         elif standing_on_platform and jump_force > 1.0 and not is_jumping:
@@ -350,6 +352,7 @@ while running:
                     score += 50
                 else: game_state = "GAME_OVER"
 
+        # 只有在非 initial_drop 状态下才滚动地图，防止开局地板被卷走
         if not initial_drop and player_y < HEIGHT / 2.5:
             scroll_amt = (HEIGHT / 2.5) - player_y
             player_y += scroll_amt
@@ -390,6 +393,7 @@ while running:
 
     if game_state == "PLAYING":
         for r, b, br, f in platforms:
+            # 【绘制确认】如果 b (is_bouncing) 为 True，则使用橙色 (255,165,0)
             color = (80,80,80) if f else ((255,165,0) if b else (180,180,100))
             pygame.draw.rect(screen, color, r)
         for r, v in hazards:
@@ -433,10 +437,10 @@ while running:
             screen.blit(text, (30, ui_y + 15))
             if remaining > 0:
                 time_text = FONT.render(f"{remaining:.1f}s", True, (150, 150, 150))
-                screen.blit(time_text, (180, ui_y + 15)) # MOVED FROM 160
+                screen.blit(time_text, (180, ui_y + 15))
             else:
                 ready_text = FONT.render("READY", True, (255, 255, 255))
-                screen.blit(ready_text, (180, ui_y + 15)) # MOVED FROM 160
+                screen.blit(ready_text, (180, ui_y + 15))
             ui_y += 60
 
 
