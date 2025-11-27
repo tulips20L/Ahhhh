@@ -15,7 +15,7 @@ pygame.mixer.init()
 info = pygame.display.Info()
 WIDTH, HEIGHT = info.current_w, info.current_h
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
-pygame.display.set_caption("Sound Jumper - Final")
+pygame.display.set_caption("Sound Jumper - Space Edition")
 
 # ---------- 2. 音频处理 ----------
 SAMPLE_RATE = 44100
@@ -93,15 +93,15 @@ velocity_y = 0
 gravity = 2
 PLATFORM_FALL_SPEED = 20
 
-# ========== [48x48 规格自动切割] ==========
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# ========== [加载 48x48 角色] ==========
 sprite_loaded = False
 animation_frames = []
 current_frame_index = 0
 
 try:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     image_path = os.path.join(script_dir, "character_sheet.png")
-
     if not os.path.exists(image_path):
         print(f"提示: 未找到 {image_path}，将使用默认方块。")
     else:
@@ -110,7 +110,7 @@ try:
         FRAME_W = 48
         FRAME_H = 48
         FRAME_COUNT = sheet_width // FRAME_W
-        print(f"加载成功：{sheet_width}x{sprite_sheet.get_height()}，包含 {FRAME_COUNT} 帧")
+        print(f"角色加载成功：{sheet_width}x{sprite_sheet.get_height()}，包含 {FRAME_COUNT} 帧")
 
         animation_frames = []
         for i in range(FRAME_COUNT):
@@ -121,10 +121,35 @@ try:
         if len(animation_frames) > 0:
             sprite_loaded = True
 except Exception as e:
-    print(f"加载出错: {e}")
+    print(f"角色加载出错: {e}")
     sprite_loaded = False
 
-# 声音与技能参数
+# ========== [新增：加载背景图片] ==========
+game_bg_image = None
+try:
+    # 请确保文件名正确
+    bg_filename = "bg.jpg" 
+    bg_path = os.path.join(script_dir, bg_filename)
+    
+    if os.path.exists(bg_path):
+        loaded_bg = cv2.imread(bg_path)
+        if loaded_bg is not None:
+            # 预先缩放背景图以适应屏幕尺寸，避免在循环中重复计算
+            game_bg_image = cv2.resize(loaded_bg, (WIDTH, HEIGHT))
+            print("背景图片加载成功！")
+        else:
+            print("背景图片读取失败。")
+    else:
+        print(f"提示: 未找到背景图片 {bg_filename}")
+except Exception as e:
+    print(f"背景加载出错: {e}")
+
+# 透明度设置 (摄像头权重, 背景权重)
+# 你可以调整这里：0.7 表示摄像头占 70%，0.3 表示背景占 30%
+CAMERA_WEIGHT = 0.7 
+BACKGROUND_WEIGHT = 0.3
+# ========================================
+
 VOLUME_THRESHOLD = 0.001
 VOLUME_SENSITIVITY = 4000
 BOUNCE_MULTIPLIER = 2.0
@@ -150,8 +175,6 @@ def generate_initial_platforms():
     global platforms
     platforms.clear()
     start_plat_w = 200
-    # 【需求实现 1：橙色弹跳平台】
-    # 第二个参数设置为 True (is_bouncing)，这会让平台在绘制时变成橙色，并具有弹跳属性
     platforms.append((pygame.Rect(WIDTH // 2 - start_plat_w // 2, HEIGHT - 150, start_plat_w, 15), True, False, False))
 
     y = HEIGHT - 300
@@ -174,25 +197,28 @@ is_jumping = False
 scroll = 0
 game_state = "START"
 hand_target_x = WIDTH // 2
-initial_drop = True # 核心标记：是否处于开局下落状态
+initial_drop = True
 
+# 调暗遮罩层 (稍微调低一点透明度，让背景更清楚)
 dim_surface = pygame.Surface((WIDTH, HEIGHT))
-dim_surface.set_alpha(160)
+dim_surface.set_alpha(100) # 原 160 -> 改为 100，让背景更亮
 dim_surface.fill((0, 0, 0))
 
 audio_stream = start_audio_stream()
 
 running = True
 while running:
-    # ------------------ 输入 ------------------
+    # ------------------ 输入与背景处理 ------------------
     bg_surface = None
     current_gesture = "NONE"
 
-    # 1. 获取摄像头输入
+    # 1. 获取摄像头输入 & 混合背景
     if camera_available and cap is not None:
         success, image = cap.read()
         if success:
             image = cv2.flip(image, 1)
+            
+            # 手势识别处理
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = hands.process(image_rgb)
             h, w, c = image.shape
@@ -201,10 +227,8 @@ while running:
                 for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     label = results.multi_handedness[idx].classification[0].label
                     hand_cx = hand_landmarks.landmark[9].x
-
                     if label == "Left":
                         target_raw = hand_cx * WIDTH
-                        # 更新手部目标，但在 initial_drop 时会被覆盖
                         hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
                         cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
                     elif label == "Right":
@@ -212,17 +236,26 @@ while running:
                         current_gesture = gesture
                         cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
-            bg_image = cv2.resize(image, (WIDTH, HEIGHT))
-            bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
+            
+            # --- [核心修改] 背景混合逻辑 ---
+            # 先将摄像头画面缩放到屏幕大小
+            final_bg_image = cv2.resize(image, (WIDTH, HEIGHT))
+            
+            # 如果背景图加载成功，则进行混合
+            if game_bg_image is not None:
+                # addWeighted(图1, 权重1, 图2, 权重2, gamma)
+                final_bg_image = cv2.addWeighted(final_bg_image, CAMERA_WEIGHT, game_bg_image, BACKGROUND_WEIGHT, 0)
+            
+            # 转换为 Pygame 格式
+            bg_surface = pygame.image.frombuffer(final_bg_image.tobytes(), final_bg_image.shape[1::-1], "RGB")
 
-    # 2. 获取键盘输入
+    # 2. 键盘输入
     keys = pygame.key.get_pressed()
     if not camera_available:
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: keyboard_target_x = max(0, keyboard_target_x - keyboard_move_speed)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: keyboard_target_x = min(WIDTH - player_w, keyboard_target_x + keyboard_move_speed)
 
-    # 3. 【需求实现 2：强制锁定逻辑】
-    # 这一步必须放在所有输入获取之后，确保覆盖掉任何移动指令
+    # 3. 锁定逻辑
     if initial_drop:
         hand_target_x = WIDTH // 2 - player_w // 2
         keyboard_target_x = WIDTH // 2 - player_w // 2
@@ -260,26 +293,19 @@ while running:
                     player_x = WIDTH // 2 - player_w // 2
                     player_y = -50
                     keyboard_target_x = WIDTH // 2 - player_w // 2
-                    
-                    # 重新开始时，重置锁定状态
                     initial_drop = True 
-                    
                     for skill in skills.values(): skill['last_use'] = 0
                     game_state = "PLAYING"
             elif game_state == "START": game_state = "SETTINGS"
             elif game_state == "GAME_OVER": game_state = "SETTINGS"
 
-    # 设置界面调节逻辑
     if game_state == "SETTINGS":
         adjustment_speed = 25
-        if keys[pygame.K_LEFT]:
-            volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - adjustment_speed)
-        if keys[pygame.K_RIGHT]:
-            volume_sensitivity_adjusted = min(8000, volume_sensitivity_adjusted + adjustment_speed)
+        if keys[pygame.K_LEFT]: volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - adjustment_speed)
+        if keys[pygame.K_RIGHT]: volume_sensitivity_adjusted = min(8000, volume_sensitivity_adjusted + adjustment_speed)
             
     now = time.time()
     if game_state == "PLAYING" and camera_available:
-        # 手势技能触发
         if current_gesture == "VICTORY" and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
             spawn_y = min(HEIGHT-50, player_y + 100)
             platforms.append((pygame.Rect(player_x - 30, spawn_y, PLATFORM_WIDTH, PLATFORM_HEIGHT), True, False, False))
@@ -304,13 +330,11 @@ while running:
 
         player_y += velocity_y
         player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
-
         standing_on_platform = None
         is_on_bouncy_platform = False
 
         if velocity_y >= 0:
             velocity_y = min(velocity_y, 40)
-
             for i, (plat_rect, is_bouncing, is_broken, is_falling) in enumerate(platforms):
                 if not is_falling and player_rect.colliderect(plat_rect) and abs(player_rect.bottom - plat_rect.top) < velocity_y + 20:
                     standing_on_platform = plat_rect
@@ -318,7 +342,6 @@ while running:
                     if not is_bouncing and i != 0 and random.random() < 0.3:
                         platforms[i] = (plat_rect, is_bouncing, True, True)
                     break
-
             if standing_on_platform:
                 player_y = standing_on_platform.top - player_h
                 velocity_y = 0
@@ -329,17 +352,13 @@ while running:
             velocity_y += gravity
 
         base_jump = -(10 + jump_force)
-
-        # 【核心逻辑：解除控制锁定】
         if initial_drop and standing_on_platform:
-            initial_drop = False  # 第一次踩到平台后，解锁控制
-            velocity_y = -20      # 第一次自动弹起
+            initial_drop = False
+            velocity_y = -20
             is_jumping = True
-
         elif standing_on_platform and jump_force > 1.0 and not is_jumping:
             velocity_y = base_jump * BOUNCE_MULTIPLIER if is_on_bouncy_platform else base_jump
             is_jumping = True
-
         if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
             velocity_y = -15
             is_jumping = True
@@ -352,7 +371,6 @@ while running:
                     score += 50
                 else: game_state = "GAME_OVER"
 
-        # 只有在非 initial_drop 状态下才滚动地图，防止开局地板被卷走
         if not initial_drop and player_y < HEIGHT / 2.5:
             scroll_amt = (HEIGHT / 2.5) - player_y
             player_y += scroll_amt
@@ -387,13 +405,15 @@ while running:
         if player_y > HEIGHT: game_state = "GAME_OVER"
 
     # ------------------ 绘制 ------------------
+    # 绘制混合后的背景 (摄像头+图片)
     if bg_surface: screen.blit(bg_surface, (0, 0))
     else: screen.fill((20, 20, 30))
+    
+    # 绘制半透明遮罩 (让游戏UI更清晰，但因为alpha调低了所以能看清背景)
     screen.blit(dim_surface, (0, 0))
 
     if game_state == "PLAYING":
         for r, b, br, f in platforms:
-            # 【绘制确认】如果 b (is_bouncing) 为 True，则使用橙色 (255,165,0)
             color = (80,80,80) if f else ((255,165,0) if b else (180,180,100))
             pygame.draw.rect(screen, color, r)
         for r, v in hazards:
@@ -401,19 +421,15 @@ while running:
 
         if sprite_loaded and len(animation_frames) > 0:
             total_frames = len(animation_frames)
-            if not is_jumping:
-                current_frame_index = 0
+            if not is_jumping: current_frame_index = 0
             else:
                 progress = max(0.0, min(1.0, (velocity_y + 15) / 30.0))
                 air_count = total_frames - 1
-                if air_count > 0:
-                    current_frame_index = 1 + int(progress * (air_count - 1))
-                else:
-                    current_frame_index = 0
+                if air_count > 0: current_frame_index = 1 + int(progress * (air_count - 1))
+                else: current_frame_index = 0
             if current_frame_index >= total_frames: current_frame_index = total_frames - 1
             char_img = animation_frames[current_frame_index]
-            if hand_target_x < player_x - 5:
-                 char_img = pygame.transform.flip(char_img, True, False)
+            if hand_target_x < player_x - 5: char_img = pygame.transform.flip(char_img, True, False)
             screen.blit(char_img, (int(player_x) - 4, int(player_y) - 4))
         else:
             pygame.draw.rect(screen, (200, 80, 120), (int(player_x), int(player_y), player_w, player_h))
@@ -443,7 +459,6 @@ while running:
                 screen.blit(ready_text, (180, ui_y + 15))
             ui_y += 60
 
-
         if not camera_available:
             no_cam_text = FONT.render("No Camera - Keyboard Mode", True, (255, 100, 100))
             screen.blit(no_cam_text, (WIDTH//2 - no_cam_text.get_width()//2, 20))
@@ -469,11 +484,9 @@ while running:
         setting_y = HEIGHT//2 - 50
         label = FONT.render(f"Voice Sensitivity: {int(volume_sensitivity_adjusted)}", True, (255, 255, 255))
         screen.blit(label, (WIDTH//2 - label.get_width()//2, setting_y))
-
         pygame.draw.rect(screen, (100,100,100), (WIDTH//2-200, setting_y+60, 400, 20))
         fill_w = int((volume_sensitivity_adjusted-500)/(8000-500)*400)
         pygame.draw.rect(screen, (0,255,100), (WIDTH//2-200, setting_y+60, fill_w, 20))
-
         start_text = FONT.render("Use Left/Right Arrows to Adjust", True, (200, 200, 200))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 150))
         start_text = FONT.render("Press SPACE to Start", True, (100, 255, 100))
