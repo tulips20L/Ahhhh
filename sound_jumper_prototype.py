@@ -6,7 +6,7 @@ import time
 import random
 import cv2
 import mediapipe as mp
-import os 
+import os
 
 # ---------- 1. 初始化 & 屏幕设置 ----------
 pygame.init()
@@ -47,7 +47,7 @@ def start_audio_stream():
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=2, 
+    max_num_hands=2,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
@@ -59,25 +59,37 @@ try:
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if cap.isOpened():
         ret, frame = cap.read()
-        if ret: 
+        if ret:
             camera_available = True
             print("摄像头已启动")
         else: cap.release(); cap = None
 except: pass
 
 def count_extended_fingers(hand_landmarks):
-    tips = [4, 8, 12, 16, 20]
-    pips = [3, 6, 10, 14, 18]
+    """
+    Counts extended fingers based on landmark positions.
+    Returns "FIST", "PALM", "VICTORY", or "UNKNOWN".
+    """
+    TIPS = [4, 8, 12, 16, 20]
+    PIPS = [2, 6, 10, 14, 18]
     extended = [0, 0, 0, 0, 0]
+
+    # For fingers (Index to Pinky)
     for i in range(1, 5):
-        if hand_landmarks.landmark[tips[i]].y < hand_landmarks.landmark[pips[i]].y:
+        if hand_landmarks.landmark[TIPS[i]].y < hand_landmarks.landmark[PIPS[i]].y:
             extended[i] = 1
-    if abs(hand_landmarks.landmark[4].x - hand_landmarks.landmark[3].x) > 0.05:
+
+    # For Thumb
+    if hand_landmarks.landmark[TIPS[0]].x < hand_landmarks.landmark[PIPS[0]].x:
         extended[0] = 1
+
     count = sum(extended)
+
     if count >= 4: return "PALM"
     if count <= 1: return "FIST"
-    if extended[1] and extended[2] and not extended[3] and not extended[4]: return "VICTORY"
+    if extended[1] and extended[2] and not extended[0] and not extended[3] and not extended[4]:
+        return "VICTORY"
+
     return "UNKNOWN"
 
 # ---------- 4. 游戏变量 ----------
@@ -85,7 +97,7 @@ clock = pygame.time.Clock()
 FONT = pygame.font.SysFont(None, 30)
 BIG_FONT = pygame.font.SysFont(None, 60)
 
-player_w, player_h = 40, 40 
+player_w, player_h = 40, 40
 player_x = WIDTH//2 - player_w//2
 player_y = -50
 velocity_y = 0
@@ -99,8 +111,8 @@ current_frame_index = 0
 
 try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    image_path = os.path.join(script_dir, "character_sheet.png") 
-    
+    image_path = os.path.join(script_dir, "character_sheet.png")
+
     if not os.path.exists(image_path):
         print(f"提示: 未找到 {image_path}，将使用默认方块。")
     else:
@@ -116,7 +128,7 @@ try:
             frame_surf = sprite_sheet.subsurface((i * FRAME_W, 0, FRAME_W, FRAME_H))
             scaled_frame = pygame.transform.scale(frame_surf, (48, 48))
             animation_frames.append(scaled_frame)
-        
+
         if len(animation_frames) > 0:
             sprite_loaded = True
 except Exception as e:
@@ -124,8 +136,8 @@ except Exception as e:
     sprite_loaded = False
 
 # 声音与技能参数
-VOLUME_THRESHOLD = 0.001       
-VOLUME_SENSITIVITY = 4000      
+VOLUME_THRESHOLD = 0.001
+VOLUME_SENSITIVITY = 4000
 BOUNCE_MULTIPLIER = 2.0
 volume_sensitivity_adjusted = VOLUME_SENSITIVITY
 
@@ -142,17 +154,15 @@ keyboard_move_speed = 15
 
 platforms = []
 hazards = []
-PLATFORM_WIDTH, PLATFORM_HEIGHT = 120, 15 
+PLATFORM_WIDTH, PLATFORM_HEIGHT = 120, 15
 HAZARD_SIZE, HAZARD_SPEED = 15, 10
 
 def generate_initial_platforms():
     global platforms
     platforms.clear()
-    # [修改] 稍微加宽初始平台 (100 -> 200) 以增加容错率
-    # 确保它生成在屏幕下方 (HEIGHT - 150)
     start_plat_w = 200
     platforms.append((pygame.Rect(WIDTH // 2 - start_plat_w // 2, HEIGHT - 150, start_plat_w, 15), True, False, False))
-    
+
     y = HEIGHT - 300
     while y > -HEIGHT:
         x = random.randint(0, WIDTH - PLATFORM_WIDTH)
@@ -162,8 +172,8 @@ def generate_initial_platforms():
 
 def generate_hazard(highest_y):
     x = random.randint(0, WIDTH)
-    y = highest_y - random.randint(100, 300) 
-    vx = random.choice([-HAZARD_SPEED, HAZARD_SPEED]) 
+    y = highest_y - random.randint(100, 300)
+    vx = random.choice([-HAZARD_SPEED, HAZARD_SPEED])
     hazards.append((pygame.Rect(x, y, HAZARD_SIZE, HAZARD_SIZE), vx))
 
 generate_initial_platforms()
@@ -171,7 +181,7 @@ generate_initial_platforms()
 score = 0
 is_jumping = False
 scroll = 0
-game_state = "START" 
+game_state = "START"
 hand_target_x = WIDTH // 2
 initial_drop = True
 
@@ -186,7 +196,7 @@ while running:
     # ------------------ 输入 ------------------
     bg_surface = None
     current_gesture = "NONE"
-    
+
     if camera_available and cap is not None:
         success, image = cap.read()
         if success:
@@ -194,27 +204,24 @@ while running:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = hands.process(image_rgb)
             h, w, c = image.shape
-            
+
             if results.multi_hand_landmarks:
                 for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     label = results.multi_handedness[idx].classification[0].label
                     hand_cx = hand_landmarks.landmark[9].x
-                    
-                    if label == "Left": 
+
+                    if label == "Left":
                         target_raw = hand_cx * WIDTH
                         hand_target_x = max(0, min(WIDTH - player_w, target_raw - player_w/2))
                         cv2.circle(image, (int(hand_cx*w), int(hand_landmarks.landmark[9].y*h)), 15, (0, 255, 0), -1)
                     elif label == "Right":
                         gesture = count_extended_fingers(hand_landmarks)
                         current_gesture = gesture
-                        cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40), 
+                        cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
             bg_image = cv2.resize(image, (WIDTH, HEIGHT))
             bg_surface = pygame.image.frombuffer(bg_image.tobytes(), bg_image.shape[1::-1], "RGB")
-    else:
-        pass
 
-    # [修复逻辑] 确保开局强制居中
     if initial_drop:
         hand_target_x = WIDTH // 2 - player_w // 2
         keyboard_target_x = WIDTH // 2 - player_w // 2
@@ -226,12 +233,12 @@ while running:
     if not camera_available:
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: keyboard_target_x = max(0, keyboard_target_x - keyboard_move_speed)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: keyboard_target_x = min(WIDTH - player_w, keyboard_target_x + keyboard_move_speed)
-    
+
     for event in pygame.event.get():
         if event.type == pygame.QUIT: running = False
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE: running = False
-            
+
             if game_state == "PLAYING" and not camera_available:
                 now = time.time()
                 if event.key == pygame.K_1 and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
@@ -245,30 +252,31 @@ while running:
                     hazards.clear()
                     shockwave_radius = 1
                     skills["BLAST"]["last_use"] = now
-            
+
             if game_state == "SETTINGS":
-                if event.key == pygame.K_LEFT: volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - 500)
-                elif event.key == pygame.K_RIGHT: volume_sensitivity_adjusted = min(8000, volume_sensitivity_adjusted + 500)
-                elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    player_vx = velocity_y = 0
+                if event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
+                    velocity_y = 0
                     score = scroll = 0
                     is_jumping = False
                     generate_initial_platforms()
                     hazards.clear()
-                    
-                    # [修复逻辑] 重置位置时，确保对齐到正中心
-                    player_x = WIDTH // 2 - player_w // 2 
+                    player_x = WIDTH // 2 - player_w // 2
                     player_y = -50
                     keyboard_target_x = WIDTH // 2 - player_w // 2
-                    
                     initial_drop = True
-                    skills["RESCUE"]["last_use"] = 0
-                    skills["SHIELD"]["last_use"] = 0
-                    skills["BLAST"]["last_use"] = 0
+                    for skill in skills.values(): skill['last_use'] = 0
                     game_state = "PLAYING"
             elif game_state == "START": game_state = "SETTINGS"
             elif game_state == "GAME_OVER": game_state = "SETTINGS"
 
+    # --- Continuous Input Logic (moved outside the event loop) ---
+    if game_state == "SETTINGS":
+        adjustment_speed = 25  # Controls how fast the value changes
+        if keys[pygame.K_LEFT]:
+            volume_sensitivity_adjusted = max(500, volume_sensitivity_adjusted - adjustment_speed)
+        if keys[pygame.K_RIGHT]:
+            volume_sensitivity_adjusted = min(8000, volume_sensitivity_adjusted + adjustment_speed)
+            
     now = time.time()
     if game_state == "PLAYING" and camera_available:
         if current_gesture == "VICTORY" and now - skills["RESCUE"]["last_use"] > skills["RESCUE"]["cooldown"]:
@@ -288,30 +296,28 @@ while running:
         player_x += (hand_target_x - player_x) * 0.2
         with lock: current_rms = volume_rms
         jump_force = 0.0
-        
+
         if current_rms > VOLUME_THRESHOLD:
             raw_force = (current_rms - VOLUME_THRESHOLD) * volume_sensitivity_adjusted
-            jump_force = min(25, raw_force) 
+            jump_force = min(25, raw_force)
 
         player_y += velocity_y
         player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
-        
+
         standing_on_platform = None
         is_on_bouncy_platform = False
-        
+
         if velocity_y >= 0:
-            # [增加稳定性] 限制最大下落速度，防止穿模
             velocity_y = min(velocity_y, 40)
-            
+
             for i, (plat_rect, is_bouncing, is_broken, is_falling) in enumerate(platforms):
-                # 碰撞检测：宽容度稍微增加 (+20)
                 if not is_falling and player_rect.colliderect(plat_rect) and abs(player_rect.bottom - plat_rect.top) < velocity_y + 20:
                     standing_on_platform = plat_rect
                     is_on_bouncy_platform = is_bouncing
                     if not is_bouncing and i != 0 and random.random() < 0.3:
                         platforms[i] = (plat_rect, is_bouncing, True, True)
                     break
-            
+
             if standing_on_platform:
                 player_y = standing_on_platform.top - player_h
                 velocity_y = 0
@@ -322,16 +328,16 @@ while running:
             velocity_y += gravity
 
         base_jump = -(10 + jump_force)
-        
+
         if initial_drop and standing_on_platform:
             initial_drop = False
-            velocity_y = -20 
+            velocity_y = -20
             is_jumping = True
-                
+
         elif standing_on_platform and jump_force > 1.0 and not is_jumping:
             velocity_y = base_jump * BOUNCE_MULTIPLIER if is_on_bouncy_platform else base_jump
             is_jumping = True
-        
+
         if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
             velocity_y = -15
             is_jumping = True
@@ -344,8 +350,6 @@ while running:
                     score += 50
                 else: game_state = "GAME_OVER"
 
-        # [核心修复]：只有当 initial_drop 为 False 时才允许滚动地图
-        # 这样可以防止角色刚出生在 -50 时，系统误以为角色跳得太高而把地板卷走
         if not initial_drop and player_y < HEIGHT / 2.5:
             scroll_amt = (HEIGHT / 2.5) - player_y
             player_y += scroll_amt
@@ -390,24 +394,21 @@ while running:
             pygame.draw.rect(screen, color, r)
         for r, v in hazards:
             pygame.draw.circle(screen, (255, 50, 50), r.center, HAZARD_SIZE//2)
-        
-        # 绘制角色
+
         if sprite_loaded and len(animation_frames) > 0:
             total_frames = len(animation_frames)
             if not is_jumping:
-                current_frame_index = 0 
+                current_frame_index = 0
             else:
-                progress = (velocity_y + 15) / 30.0
-                progress = max(0.0, min(1.0, progress))
+                progress = max(0.0, min(1.0, (velocity_y + 15) / 30.0))
                 air_count = total_frames - 1
                 if air_count > 0:
-                    offset = int(progress * (air_count - 1))
-                    current_frame_index = 1 + offset
+                    current_frame_index = 1 + int(progress * (air_count - 1))
                 else:
                     current_frame_index = 0
             if current_frame_index >= total_frames: current_frame_index = total_frames - 1
             char_img = animation_frames[current_frame_index]
-            if hand_target_x < player_x - 5: 
+            if hand_target_x < player_x - 5:
                  char_img = pygame.transform.flip(char_img, True, False)
             screen.blit(char_img, (int(player_x) - 4, int(player_y) - 4))
         else:
@@ -420,26 +421,24 @@ while running:
             pygame.draw.circle(screen, (0, 255, 255), (WIDTH//2, HEIGHT//2), shockwave_radius, 10)
             if shockwave_radius > WIDTH: shockwave_radius = 0
 
-        # UI
         ui_y = HEIGHT // 2 - 100
         for key, skill in skills.items():
             remaining = max(0, skill["cooldown"] - (now - skill["last_use"]))
             alpha = 100 if remaining > 0 else 255
             bg_rect = pygame.Rect(20, ui_y, 220, 50)
-            s = pygame.Surface((220, 50))
-            s.set_alpha(alpha)
-            s.fill((30, 30, 40))
+            s = pygame.Surface((220, 50)); s.set_alpha(alpha); s.fill((30, 30, 40))
             screen.blit(s, bg_rect)
             pygame.draw.rect(screen, skill["color"], bg_rect, 2)
             text = FONT.render(skill["name"], True, skill["color"])
             screen.blit(text, (30, ui_y + 15))
             if remaining > 0:
                 time_text = FONT.render(f"{remaining:.1f}s", True, (150, 150, 150))
-                screen.blit(time_text, (160, ui_y + 15))
+                screen.blit(time_text, (180, ui_y + 15)) # MOVED FROM 160
             else:
                 ready_text = FONT.render("READY", True, (255, 255, 255))
-                screen.blit(ready_text, (160, ui_y + 15))
-            ui_y += 70
+                screen.blit(ready_text, (180, ui_y + 15)) # MOVED FROM 160
+            ui_y += 60
+
 
         if not camera_available:
             no_cam_text = FONT.render("No Camera - Keyboard Mode", True, (255, 100, 100))
@@ -454,32 +453,34 @@ while running:
     elif game_state == "START":
         title = BIG_FONT.render("SOUND JUMPER", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//3))
-        if camera_available: instr = ["RIGHT HAND: Move", "LEFT HAND: Gestures", "VOICE: Jump", "Press Key to Continue"]
-        else: instr = ["NO CAMERA", "A/D: Move", "1/2/3: Skills", "VOICE: Jump", "Press Key to Continue"]
+        instr = ["RIGHT HAND: Move", "LEFT HAND: Gestures", "VOICE: Jump", "Press Key to Continue"] if camera_available else ["NO CAMERA", "A/D: Move", "1/2/3: Skills", "VOICE: Jump", "Press Key to Continue"]
         y = HEIGHT//2
         for line in instr:
             t = FONT.render(line, True, (200, 200, 200))
-            screen.blit(t, (WIDTH//2 - t.get_width()//2, y))
-            y += 40
+            screen.blit(t, (WIDTH//2 - t.get_width()//2, y)); y += 40
+
     elif game_state == "SETTINGS":
         title = BIG_FONT.render("SETTINGS", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//4))
         setting_y = HEIGHT//2 - 50
-        label = FONT.render(f"Voice Sensitivity: {volume_sensitivity_adjusted}", True, (255, 255, 255))
+        label = FONT.render(f"Voice Sensitivity: {int(volume_sensitivity_adjusted)}", True, (255, 255, 255))
         screen.blit(label, (WIDTH//2 - label.get_width()//2, setting_y))
-        
+
         pygame.draw.rect(screen, (100,100,100), (WIDTH//2-200, setting_y+60, 400, 20))
-        fill_w = int((volume_sensitivity_adjusted-500)/(7500)*400)
+        fill_w = int((volume_sensitivity_adjusted-500)/(8000-500)*400)
         pygame.draw.rect(screen, (0,255,100), (WIDTH//2-200, setting_y+60, fill_w, 20))
-        
+
+        start_text = FONT.render("Use Left/Right Arrows to Adjust", True, (200, 200, 200))
+        screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 150))
         start_text = FONT.render("Press SPACE to Start", True, (100, 255, 100))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 100))
+
     elif game_state == "GAME_OVER":
         t = BIG_FONT.render("GAME OVER", True, (255, 50, 50))
         screen.blit(t, (WIDTH//2 - t.get_width()//2, HEIGHT//3))
         s = BIG_FONT.render(f"Score: {score}", True, (255, 255, 255))
         screen.blit(s, (WIDTH//2 - s.get_width()//2, HEIGHT//2))
-        r = FONT.render("Press Any Key to Settings", True, (200, 200, 200))
+        r = FONT.render("Press Any Key to Continue", True, (200, 200, 200))
         screen.blit(r, (WIDTH//2 - r.get_width()//2, HEIGHT//2 + 80))
 
     pygame.display.flip()
