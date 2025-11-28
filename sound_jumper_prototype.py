@@ -33,11 +33,17 @@ def audio_callback(indata, frames, time_info, status):
     rms = np.sqrt(np.mean(mono.astype(np.float64)**2))
     with lock: volume_rms = rms
 
-def start_audio_stream():
+def start_audio_stream(device=None):
     try:
-        stream = sd.InputStream(channels=1, samplerate=SAMPLE_RATE,
-                                blocksize=FRAME_SIZE, callback=audio_callback)
+        stream = sd.InputStream(
+            channels=1,
+            samplerate=SAMPLE_RATE,
+            blocksize=FRAME_SIZE,
+            callback=audio_callback,
+            device=device
+        )
         stream.start()
+        print(f"音频流已在设备上启动: {sd.query_devices(device)['name'] if device is not None else 'Default'}")
         return stream
     except Exception as e:
         print(f"音频错误: {e}")
@@ -127,14 +133,11 @@ except Exception as e:
 # ========== [新增：加载背景图片] ==========
 game_bg_image = None
 try:
-    # 请确保文件名正确
     bg_filename = "bg.jpg" 
     bg_path = os.path.join(script_dir, bg_filename)
-    
     if os.path.exists(bg_path):
         loaded_bg = cv2.imread(bg_path)
         if loaded_bg is not None:
-            # 预先缩放背景图以适应屏幕尺寸，避免在循环中重复计算
             game_bg_image = cv2.resize(loaded_bg, (WIDTH, HEIGHT))
             print("背景图片加载成功！")
         else:
@@ -144,7 +147,6 @@ try:
 except Exception as e:
     print(f"背景加载出错: {e}")
 
-# 透明度设置 (摄像头权重, 背景权重)
 CAMERA_WEIGHT = 0.7 
 BACKGROUND_WEIGHT = 0.3
 # ========================================
@@ -167,7 +169,7 @@ keyboard_move_speed = 15
 
 platforms = []
 hazards = []
-PLATFORM_WIDTH, PLATFORM_HEIGHT = 120, 15
+PLATFORM_HEIGHT = 15
 HAZARD_SIZE, HAZARD_SPEED = 15, 10
 
 # ----------- PLATFORM WIDTH FUNCTION -----------
@@ -181,12 +183,12 @@ def get_platform_width(y, scroll):
 def generate_initial_platforms():
     global platforms
     platforms.clear()
-    start_plat_w = 220  # Larger starting platform
+    start_plat_w = 220
     platforms.append((pygame.Rect(WIDTH // 2 - start_plat_w // 2, HEIGHT - 150, start_plat_w, 15), True, False, False))
 
     y = HEIGHT - 300
     while y > -HEIGHT:
-        plat_w = get_platform_width(y, 0)  # At the start, scroll=0
+        plat_w = get_platform_width(y, 0)
         x = random.randint(0, WIDTH - plat_w)
         is_bouncing = random.random() < 0.25
         platforms.append((pygame.Rect(x, y, plat_w, PLATFORM_HEIGHT), is_bouncing, False, False))
@@ -207,12 +209,31 @@ game_state = "START"
 hand_target_x = WIDTH // 2
 initial_drop = True
 
-# 调暗遮罩层 (稍微调低一点透明度，让背景更清楚)
 dim_surface = pygame.Surface((WIDTH, HEIGHT))
-dim_surface.set_alpha(100) # 原 160 -> 改为 100，让背景更亮
+dim_surface.set_alpha(100)
 dim_surface.fill((0, 0, 0))
 
-audio_stream = start_audio_stream()
+# ----- [NEW] Sound Device Selection Setup -----
+try:
+    input_devices = [d for d in sd.query_devices() if d['max_input_channels'] > 0]
+    if not input_devices:
+        print("警告: 未找到任何音频输入设备！")
+except Exception as e:
+    input_devices = []
+    print(f"查询音频设备时出错: {e}")
+
+selected_device_index = 0
+
+def get_selected_device_name():
+    if input_devices and selected_device_index < len(input_devices):
+        name = input_devices[selected_device_index]['name']
+        return (name[:40] + '...') if len(name) > 43 else name
+    else:
+        return "No Input Device Found"
+
+# Start initial audio stream
+audio_stream = start_audio_stream(input_devices[selected_device_index]['index'] if input_devices else None)
+# ---------------------------------------------
 
 running = True
 while running:
@@ -220,17 +241,13 @@ while running:
     bg_surface = None
     current_gesture = "NONE"
 
-    # 1. 获取摄像头输入 & 混合背景
     if camera_available and cap is not None:
         success, image = cap.read()
         if success:
             image = cv2.flip(image, 1)
-            
-            # 手势识别处理
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = hands.process(image_rgb)
             h, w, c = image.shape
-
             if results.multi_hand_landmarks:
                 for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     label = results.multi_handedness[idx].classification[0].label
@@ -244,30 +261,19 @@ while running:
                         current_gesture = gesture
                         cv2.putText(image, gesture, (int(hand_cx*w)-40, int(hand_landmarks.landmark[9].y*h)-40),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
-            
-            # --- [核心修改] 背景混合逻辑 ---
-            # 先将摄像头画面缩放到屏幕大小
             final_bg_image = cv2.resize(image, (WIDTH, HEIGHT))
-            
-            # 如果背景图加载成功，则进行混合
             if game_bg_image is not None:
-                # addWeighted(图1, 权重1, 图2, 权重2, gamma)
                 final_bg_image = cv2.addWeighted(final_bg_image, CAMERA_WEIGHT, game_bg_image, BACKGROUND_WEIGHT, 0)
-            
-            # 转换为 Pygame 格式
             bg_surface = pygame.image.frombuffer(final_bg_image.tobytes(), final_bg_image.shape[1::-1], "RGB")
 
-    # 2. 键盘输入
     keys = pygame.key.get_pressed()
     if not camera_available:
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: keyboard_target_x = max(0, keyboard_target_x - keyboard_move_speed)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: keyboard_target_x = min(WIDTH - player_w, keyboard_target_x + keyboard_move_speed)
 
-    # 3. 锁定逻辑
     if initial_drop:
         hand_target_x = WIDTH // 2 - player_w // 2
         keyboard_target_x = WIDTH // 2 - player_w // 2
-
     if not camera_available:
         hand_target_x = keyboard_target_x
 
@@ -288,23 +294,29 @@ while running:
                     shield_active_end = now + 3.0
                     skills["SHIELD"]["last_use"] = now
                 elif event.key == pygame.K_3 and now - skills["BLAST"]["last_use"] > skills["BLAST"]["cooldown"]:
-                    hazards.clear()
-                    shockwave_radius = 1
-                    skills["BLAST"]["last_use"] = now
+                    hazards.clear(); shockwave_radius = 1; skills["BLAST"]["last_use"] = now
 
             if game_state == "SETTINGS":
                 if event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    velocity_y = 0
-                    score = scroll = 0
-                    is_jumping = False
-                    generate_initial_platforms()
-                    hazards.clear()
-                    player_x = WIDTH // 2 - player_w // 2
-                    player_y = -50
-                    keyboard_target_x = WIDTH // 2 - player_w // 2
-                    initial_drop = True 
+                    velocity_y = 0; score = scroll = 0; is_jumping = False
+                    generate_initial_platforms(); hazards.clear()
+                    player_x = WIDTH // 2 - player_w // 2; player_y = -50
+                    keyboard_target_x = WIDTH // 2 - player_w // 2; initial_drop = True 
                     for skill in skills.values(): skill['last_use'] = 0
                     game_state = "PLAYING"
+                
+                # --- [NEW] Handle device selection with UP/DOWN keys ---
+                if event.key == pygame.K_UP:
+                    if input_devices:
+                        selected_device_index = (selected_device_index - 1) % len(input_devices)
+                        if audio_stream: audio_stream.stop(); audio_stream.close()
+                        audio_stream = start_audio_stream(input_devices[selected_device_index]['index'])
+                if event.key == pygame.K_DOWN:
+                    if input_devices:
+                        selected_device_index = (selected_device_index + 1) % len(input_devices)
+                        if audio_stream: audio_stream.stop(); audio_stream.close()
+                        audio_stream = start_audio_stream(input_devices[selected_device_index]['index'])
+            
             elif game_state == "START": game_state = "SETTINGS"
             elif game_state == "GAME_OVER": game_state = "SETTINGS"
 
@@ -321,12 +333,9 @@ while running:
             platforms.append((pygame.Rect(int(player_x + player_w/2 - plat_w/2), spawn_y, plat_w, PLATFORM_HEIGHT), True, False, False))
             skills["RESCUE"]["last_use"] = now
         if current_gesture == "FIST" and now - skills["SHIELD"]["last_use"] > skills["SHIELD"]["cooldown"]:
-            shield_active_end = now + 3.0
-            skills["SHIELD"]["last_use"] = now
+            shield_active_end = now + 3.0; skills["SHIELD"]["last_use"] = now
         if current_gesture == "PALM" and now - skills["BLAST"]["last_use"] > skills["BLAST"]["cooldown"]:
-            hazards.clear()
-            shockwave_radius = 1
-            skills["BLAST"]["last_use"] = now
+            hazards.clear(); shockwave_radius = 1; skills["BLAST"]["last_use"] = now
 
     # ------------------ 物理更新 ------------------
     if game_state == "PLAYING":
@@ -340,8 +349,7 @@ while running:
 
         player_y += velocity_y
         player_rect = pygame.Rect(int(player_x), int(player_y), player_w, player_h)
-        standing_on_platform = None
-        is_on_bouncy_platform = False
+        standing_on_platform = None; is_on_bouncy_platform = False
 
         if velocity_y >= 0:
             velocity_y = min(velocity_y, 40)
@@ -353,38 +361,29 @@ while running:
                         platforms[i] = (plat_rect, is_bouncing, True, True)
                     break
             if standing_on_platform:
-                player_y = standing_on_platform.top - player_h
-                velocity_y = 0
-                is_jumping = False
-            else:
-                velocity_y += gravity
-        else:
-            velocity_y += gravity
+                player_y = standing_on_platform.top - player_h; velocity_y = 0; is_jumping = False
+            else: velocity_y += gravity
+        else: velocity_y += gravity
 
         base_jump = -(10 + jump_force)
         if initial_drop and standing_on_platform:
-            initial_drop = False
-            velocity_y = -20
-            is_jumping = True
+            initial_drop = False; velocity_y = -20; is_jumping = True
         elif standing_on_platform and jump_force > 1.0 and not is_jumping:
             velocity_y = base_jump * BOUNCE_MULTIPLIER if is_on_bouncy_platform else base_jump
             is_jumping = True
         if standing_on_platform and is_on_bouncy_platform and not is_jumping and jump_force < 1.0:
-            velocity_y = -15
-            is_jumping = True
+            velocity_y = -15; is_jumping = True
 
         is_invincible = time.time() < shield_active_end
         for hazard_rect, _ in hazards[:]:
             if player_rect.colliderect(hazard_rect):
                 if is_invincible:
-                    hazards.remove((hazard_rect, _))
-                    score += 50
+                    hazards.remove((hazard_rect, _)); score += 50
                 else: game_state = "GAME_OVER"
 
         if not initial_drop and player_y < HEIGHT / 2.5:
             scroll_amt = (HEIGHT / 2.5) - player_y
-            player_y += scroll_amt
-            scroll += scroll_amt
+            player_y += scroll_amt; scroll += scroll_amt
             new_plats = []
             highest_y = HEIGHT
             for r, b, br, f in platforms:
@@ -416,11 +415,8 @@ while running:
         if player_y > HEIGHT: game_state = "GAME_OVER"
 
     # ------------------ 绘制 ------------------
-    # 绘制混合后的背景 (摄像头+图片)
     if bg_surface: screen.blit(bg_surface, (0, 0))
     else: screen.fill((20, 20, 30))
-    
-    # 绘制半透明遮罩 (让游戏UI更清晰，但因为alpha调低了所以能看清背景)
     screen.blit(dim_surface, (0, 0))
 
     if game_state == "PLAYING":
@@ -456,18 +452,13 @@ while running:
         for key, skill in skills.items():
             remaining = max(0, skill["cooldown"] - (now - skill["last_use"]))
             alpha = 100 if remaining > 0 else 255
-            bg_rect = pygame.Rect(20, ui_y, 220, 50)
-            s = pygame.Surface((220, 50)); s.set_alpha(alpha); s.fill((30, 30, 40))
-            screen.blit(s, bg_rect)
-            pygame.draw.rect(screen, skill["color"], bg_rect, 2)
-            text = FONT.render(skill["name"], True, skill["color"])
-            screen.blit(text, (30, ui_y + 15))
+            bg_rect = pygame.Rect(20, ui_y, 220, 50); s = pygame.Surface((220, 50)); s.set_alpha(alpha); s.fill((30, 30, 40))
+            screen.blit(s, bg_rect); pygame.draw.rect(screen, skill["color"], bg_rect, 2)
+            text = FONT.render(skill["name"], True, skill["color"]); screen.blit(text, (30, ui_y + 15))
             if remaining > 0:
-                time_text = FONT.render(f"{remaining:.1f}s", True, (150, 150, 150))
-                screen.blit(time_text, (180, ui_y + 15))
+                time_text = FONT.render(f"{remaining:.1f}s", True, (150, 150, 150)); screen.blit(time_text, (180, ui_y + 15))
             else:
-                ready_text = FONT.render("READY", True, (255, 255, 255))
-                screen.blit(ready_text, (180, ui_y + 15))
+                ready_text = FONT.render("READY", True, (255, 255, 255)); screen.blit(ready_text, (180, ui_y + 15))
             ui_y += 60
 
         if not camera_available:
@@ -486,19 +477,28 @@ while running:
         instr = ["RIGHT HAND: Move", "LEFT HAND: Gestures", "VOICE: Jump", "Press Key to Continue"] if camera_available else ["NO CAMERA", "A/D: Move", "1/2/3: Skills", "VOICE: Jump", "Press Key to Continue"]
         y = HEIGHT//2
         for line in instr:
-            t = FONT.render(line, True, (200, 200, 200))
-            screen.blit(t, (WIDTH//2 - t.get_width()//2, y)); y += 40
+            t = FONT.render(line, True, (200, 200, 200)); screen.blit(t, (WIDTH//2 - t.get_width()//2, y)); y += 40
 
     elif game_state == "SETTINGS":
         title = BIG_FONT.render("SETTINGS", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//4))
-        setting_y = HEIGHT//2 - 50
+        setting_y = HEIGHT//2 - 80
         label = FONT.render(f"Voice Sensitivity: {int(volume_sensitivity_adjusted)}", True, (255, 255, 255))
         screen.blit(label, (WIDTH//2 - label.get_width()//2, setting_y))
-        pygame.draw.rect(screen, (100,100,100), (WIDTH//2-200, setting_y+60, 400, 20))
+        pygame.draw.rect(screen, (100,100,100), (WIDTH//2-200, setting_y+40, 400, 20))
         fill_w = int((volume_sensitivity_adjusted-500)/(8000-500)*400)
-        pygame.draw.rect(screen, (0,255,100), (WIDTH//2-200, setting_y+60, fill_w, 20))
-        start_text = FONT.render("Use Left/Right Arrows to Adjust", True, (200, 200, 200))
+        pygame.draw.rect(screen, (0,255,100), (WIDTH//2-200, setting_y+40, fill_w, 20))
+
+        # --- [NEW] Draw device selection UI ---
+        device_label = FONT.render("Input Device:", True, (255, 255, 255))
+        screen.blit(device_label, (WIDTH//2 - device_label.get_width()//2, setting_y + 80))
+        device_name = get_selected_device_name()
+        device_name_text = FONT.render(device_name, True, (0, 255, 255))
+        screen.blit(device_name_text, (WIDTH//2 - device_name_text.get_width()//2, setting_y + 110))
+        device_hint = FONT.render("Use UP/DOWN Arrows to change device", True, (200, 200, 200))
+        screen.blit(device_hint, (WIDTH//2 - device_hint.get_width()//2, setting_y + 140))
+        
+        start_text = FONT.render("Use Left/Right Arrows for Sensitivity", True, (200, 200, 200))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 150))
         start_text = FONT.render("Press SPACE to Start", True, (100, 255, 100))
         screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 100))
