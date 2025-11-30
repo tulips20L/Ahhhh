@@ -1,7 +1,11 @@
 pygame==2.6.1
-numpy==2.3.4
+numpy==1.26.4
 sounddevice==0.5.3
-cffi==2.0.0
+opencv-python==4.12.0.88
+mediapipe==0.10.21
+scipy==1.16.3
+pillow==12.0.0
+absl-py==2.3.1
+protobuf==4.25.8
 pycparser==2.23
-opencv-python
-mediapipe
+cffi==2.0.0
